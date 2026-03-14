@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(work_mod);
 
     const exe = b.addExecutable(.{
-        .name = "yoke",
+        .name = "yoke_win32",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/yoke_win32.zig"),
             .target = target,

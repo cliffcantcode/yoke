@@ -19,11 +19,27 @@ const HICON = HANDLE;
 const HCURSOR = HANDLE;
 const HBRUSH = HANDLE;
 
+const WM_KEYDOWN: UINT = 0x0100;
+const WM_KEYUP: UINT = 0x0101;
+const WM_SYSKEYDOWN: UINT = 0x0104;
+const WM_SYSKEYUP: UINT = 0x0105;
+
+const VK_ESCAPE: UINT = 0x1B;
+const VK_SPACE: UINT = 0x20;
+
 const POINT = extern struct {
     x: LONG,
     y: LONG,
 };
 
+const RECT = extern struct {
+    left: LONG,
+    top: LONG,
+    right: LONG,
+    bottom: LONG,
+};
+
+extern "user32" fn GetClientRect(handle: HWND, rect: *RECT) callconv(.winapi) BOOL;
 const MSG = extern struct {
     hwnd: HWND,
     message: UINT,
@@ -125,7 +141,16 @@ const max_catchup_updates: u32 = 8;
 fn windowProc(hwnd: HWND, msg: UINT, w_param: WPARAM, l_param: LPARAM) callconv(.winapi) LRESULT {
     switch (msg) {
         WM_DESTROY => {
+            g_input_state.quit_requested = true;
             PostQuitMessage(0);
+            return 0;
+        },
+        WM_KEYDOWN, WM_SYSKEYDOWN => {
+            handleVirtualKey(@intCast(w_param), true);
+            return 0;
+        },
+        WM_KEYUP, WM_SYSKEYUP => {
+            handleVirtualKey(@intCast(w_param), false);
             return 0;
         },
         else => return DefWindowProcA(hwnd, msg, w_param, l_param),
@@ -338,6 +363,63 @@ fn sameStamp(a: std.fs.File.Stat, b: std.fs.File.Stat) bool {
     return a.size == b.size and a.mtime == b.mtime;
 }
 
+const HostButtonState = struct {
+    is_down: bool = false,
+    changed: bool = false,
+};
+
+const HostInputState = struct {
+    quit_requested: bool = false,
+    escape: HostButtonState = .{},
+    space: HostButtonState = .{},
+};
+
+var g_input_state: HostInputState = .{};
+
+fn updateButton(button: *HostButtonState, is_down: bool) void {
+    if (button.is_down != is_down) {
+        button.is_down = is_down;
+        button.changed = true;
+    }
+}
+
+fn handleVirtualKey(vk: UINT, is_down: bool) void {
+    switch (vk) {
+        VK_ESCAPE => updateButton(&g_input_state.escape, is_down),
+        VK_SPACE => updateButton(&g_input_state.space, is_down),
+        else => {},
+    }
+}
+
+fn clearInputTransitions() void {
+    g_input_state.escape.changed = false;
+    g_input_state.space.changed = false;
+}
+
+fn snapshotInput(window: HWND) !abi.Input {
+    var rect: RECT = undefined;
+    if (GetClientRect(window, &rect) == 0) {
+        return error.GetClientRectFailed;
+    }
+
+    const width: u32 = if (rect.right > 0) @intCast(rect.right) else 0;
+    const height: u32 = if (rect.bottom > 0) @intCast(rect.bottom) else 0;
+
+    return .{
+        .quit_requested = @intFromBool(g_input_state.quit_requested),
+        .client_width = width,
+        .client_height = height,
+        .escape = .{
+            .is_down = @intFromBool(g_input_state.escape.is_down),
+            .changed = @intFromBool(g_input_state.escape.changed),
+        },
+        .space = .{
+            .is_down = @intFromBool(g_input_state.space.is_down),
+            .changed = @intFromBool(g_input_state.space.changed),
+        },
+    };
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -349,7 +431,6 @@ pub fn main() !void {
     loader.current.api.init(&state);
 
     const window = try createMainWindow();
-    _ = window;
 
     const update_step_ns: u64 = std.time.ns_per_s / update_hz;
     const render_step_ns: u64 = std.time.ns_per_s / render_hz;
@@ -371,21 +452,29 @@ pub fn main() !void {
         const now_ticks = try clock.nowTicks();
         var frame_ns = clock.deltaNs(last_ticks, now_ticks);
         last_ticks = now_ticks;
-
         frame_ns = @min(frame_ns, max_frame_ns);
 
         try loader.maybeReload(&state);
+
+        const frame_input = try snapshotInput(window);
 
         update_accum += frame_ns;
         render_accum += frame_ns;
 
         var caught_up: u32 = 0;
+        var update_input = frame_input;
+
         while (update_accum >= update_step_ns and caught_up < max_catchup_updates) : (caught_up += 1) {
             update_tick += 1;
             loader.current.api.update(&state, .{
                 .dt_ns = update_step_ns,
                 .tick_index = update_tick,
+                .input = update_input,
             });
+
+            update_input.escape.changed = 0;
+            update_input.space.changed = 0;
+
             update_accum -= update_step_ns;
         }
 
@@ -394,13 +483,21 @@ pub fn main() !void {
         }
 
         if (render_accum >= render_step_ns) {
+            var render_input = frame_input;
+            render_input.escape.changed = 0;
+            render_input.space.changed = 0;
+
             render_tick += 1;
             loader.current.api.render(&state, .{
                 .dt_ns = render_step_ns,
                 .tick_index = render_tick,
+                .input = render_input,
             });
+
             render_accum %= render_step_ns;
         }
+
+        clearInputTransitions();
 
         const until_update = update_step_ns - update_accum;
         const until_render = render_step_ns - render_accum;

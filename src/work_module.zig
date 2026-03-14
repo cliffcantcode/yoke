@@ -13,25 +13,37 @@ fn onReload(state: *abi.State) callconv(.c) void {
 }
 
 fn update(state: *abi.State, ctx: abi.TickContext) callconv(.c) void {
-    state.counter += 1;
     state.update_count += 1;
     state.sim_time_ns += ctx.dt_ns;
+
+    state.counter += 1;
+
+    if (abi.buttonPressed(ctx.input.space)) {
+        state.counter += 60;
+    }
+
+    if (abi.buttonPressed(ctx.input.escape)) {
+        state.counter = 0;
+    }
 }
 
 fn render(state: *abi.State, ctx: abi.TickContext) callconv(.c) void {
     state.render_count += 1;
 
-    if (state.render_count % 15 == 0) {
+    if (state.render_count % 30 == 0) {
         std.debug.print(
-            "reloads={d} updates={d} renders={d} counter={d} sim={d:.3}s render_dt={d:.3}ms render_tick={d}\n",
+            "reloads={d} size={d}x{d} counter={d} updates={d} renders={d} space(down={d} changed={d}) escape(down={d} changed={d})\n",
             .{
                 state.reload_count,
+                ctx.input.client_width,
+                ctx.input.client_height,
+                state.counter,
                 state.update_count,
                 state.render_count,
-                state.counter,
-                abi.nsToSeconds(state.sim_time_ns),
-                abi.nsToSeconds(ctx.dt_ns) * 1000.0,
-                ctx.tick_index,
+                ctx.input.space.is_down,
+                ctx.input.space.changed,
+                ctx.input.escape.is_down,
+                ctx.input.escape.changed,
             },
         );
     }
