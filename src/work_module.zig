@@ -1,5 +1,7 @@
 const std = @import("std");
+
 const abi = @import("abi.zig");
+const theme = @import("themes.zig").default;
 
 const WorkState = struct {
     reload_count: u32 = 0,
@@ -93,8 +95,8 @@ fn render(module_state: *anyopaque, ctx: abi.TickContext, frame: *abi.Frame) cal
     const state = getState(module_state);
     state.render_count += 1;
 
-    abi.clear(frame, abi.RGB(18, 18, 26));
-    abi.fillRect(frame, 0, 0, 24, 24, abi.RGB(255, 80, 80));
+    abi.clear(frame, theme.canvas_bg);
+    abi.fillRect(frame, 0, 0, 24, 24, theme.origin_marker);
 
     const hovering = pointInRect(
         ctx.input.mouse_x,
@@ -106,11 +108,11 @@ fn render(module_state: *anyopaque, ctx: abi.TickContext, frame: *abi.Frame) cal
     );
 
     const rect_color = if (state.dragging != 0)
-        abi.RGB(255, 220, 110)
+        theme.accent_active
     else if (hovering)
-        abi.RGB(120, 220, 255)
+        theme.accent_hover
     else
-        abi.RGB(80, 220, 120);
+        theme.accent;
 
     abi.fillRect(
         frame,
@@ -127,7 +129,7 @@ fn render(module_state: *anyopaque, ctx: abi.TickContext, frame: *abi.Frame) cal
         ctx.input.mouse_y - 3,
         ctx.input.mouse_x + 4,
         ctx.input.mouse_y + 4,
-        abi.RGB(255, 255, 255),
+        theme.cursor,
     );
 
     if (state.render_count % 60 == 0) {
