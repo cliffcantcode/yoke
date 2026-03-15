@@ -1,67 +1,141 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 
-fn init(state: *abi.State) callconv(.c) void {
-    if (state.initialized == 0) {
-        state.* = .{};
-        state.initialized = 1;
+const WorkState = struct {
+    reload_count: u32 = 0,
+
+    update_count: u64 = 0,
+    render_count: u64 = 0,
+
+    rect_x: f32 = 140,
+    rect_y: f32 = 120,
+    rect_w: f32 = 240,
+    rect_h: f32 = 140,
+
+    dragging: u8 = 0,
+    drag_offset_x: f32 = 0,
+    drag_offset_y: f32 = 0,
+};
+
+comptime {
+    if (@alignOf(WorkState) > abi.module_state_alignment) {
+        @compileError("WorkState alignment exceeds abi.module_state_alignment");
     }
 }
 
-fn onReload(state: *abi.State) callconv(.c) void {
+fn getState(module_state: *anyopaque) *WorkState {
+    return @ptrCast(@alignCast(module_state));
+}
+
+fn pointInRect(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32) bool {
+    return px >= x and px < x + w and py >= y and py < y + h;
+}
+
+fn init(module_state: *anyopaque) callconv(.c) void {
+    const state = getState(module_state);
+    state.* = .{};
+}
+
+fn onReload(module_state: *anyopaque) callconv(.c) void {
+    const state = getState(module_state);
     state.reload_count += 1;
 }
 
-fn update(state: *abi.State, ctx: abi.TickContext) callconv(.c) void {
+fn update(module_state: *anyopaque, ctx: abi.TickContext) callconv(.c) void {
+    const state = getState(module_state);
     state.update_count += 1;
-    state.sim_time_ns += ctx.dt_ns;
-
-    state.counter += 1;
-
-    if (abi.buttonPressed(ctx.input.space)) {
-        state.counter += 60;
-    }
 
     if (abi.buttonPressed(ctx.input.escape)) {
-        state.counter = 0;
+        state.rect_x = 140;
+        state.rect_y = 120;
+        state.dragging = 0;
     }
-}
 
-fn drawGradient(buffer: *const abi.SoftwareBuffer, blue_offset: u32, green_offset: u32) void {
-    var y: u32 = 0;
-    while (y < buffer.height) : (y += 1) {
-        const row_base = buffer.memory + @as(usize, y) * @as(usize, buffer.pitch);
-        const row: [*]u32 = @ptrCast(@alignCast(row_base));
-
-        var x: u32 = 0;
-        while (x < buffer.width) : (x += 1) {
-            const blue = (x * 2 + blue_offset) & 0xff;
-            const green = (y + green_offset) & 0xff;
-
-            // 0x00RRGGBB
-            row[x] = (green << 8) | blue;
+    if (abi.buttonPressed(ctx.input.mouse_left)) {
+        if (pointInRect(
+            ctx.input.mouse_x,
+            ctx.input.mouse_y,
+            state.rect_x,
+            state.rect_y,
+            state.rect_w,
+            state.rect_h,
+        )) {
+            state.dragging = 1;
+            state.drag_offset_x = ctx.input.mouse_x - state.rect_x;
+            state.drag_offset_y = ctx.input.mouse_y - state.rect_y;
         }
     }
+
+    if (abi.buttonReleased(ctx.input.mouse_left)) {
+        state.dragging = 0;
+    }
+
+    if (state.dragging != 0 and ctx.input.mouse_left.is_down != 0) {
+        state.rect_x = ctx.input.mouse_x - state.drag_offset_x;
+        state.rect_y = ctx.input.mouse_y - state.drag_offset_y;
+
+        const max_x = @max(@as(f32, @floatFromInt(ctx.input.client_width)) - state.rect_w, 0.0);
+        const max_y = @max(@as(f32, @floatFromInt(ctx.input.client_height)) - state.rect_h, 0.0);
+
+        state.rect_x = std.math.clamp(state.rect_x, 0.0, max_x);
+        state.rect_y = std.math.clamp(state.rect_y, 0.0, max_y);
+    }
 }
 
-fn render(state: *abi.State, ctx: abi.TickContext, buffer: *const abi.SoftwareBuffer) callconv(.c) void {
+fn render(module_state: *anyopaque, ctx: abi.TickContext, frame: *abi.Frame) callconv(.c) void {
+    const state = getState(module_state);
     state.render_count += 1;
 
-    const blue_offset: u32 = @truncate(state.update_count);
-    const green_offset: u32 = @truncate(state.render_count);
+    abi.clear(frame, abi.RGB(18, 18, 26));
 
-    drawGradient(buffer, blue_offset, green_offset);
+    // origin marker
+    abi.fillRect(frame, 0, 0, 24, 24, abi.RGB(255, 80, 80));
+
+    const hovering = pointInRect(
+        ctx.input.mouse_x,
+        ctx.input.mouse_y,
+        state.rect_x,
+        state.rect_y,
+        state.rect_w,
+        state.rect_h,
+    );
+
+    const rect_color = if (state.dragging != 0)
+        abi.RGB(255, 220, 110)
+    else if (hovering)
+        abi.RGB(120, 220, 255)
+    else
+        abi.RGB(80, 220, 120);
+
+    abi.fillRect(
+        frame,
+        state.rect_x,
+        state.rect_y,
+        state.rect_x + state.rect_w,
+        state.rect_y + state.rect_h,
+        rect_color,
+    );
+
+    // tiny mouse marker
+    abi.fillRect(
+        frame,
+        ctx.input.mouse_x - 3,
+        ctx.input.mouse_y - 3,
+        ctx.input.mouse_x + 4,
+        ctx.input.mouse_y + 4,
+        abi.RGB(255, 255, 255),
+    );
 
     if (state.render_count % 60 == 0) {
         std.debug.print(
-            "reloads={d} size={d}x{d} counter={d} updates={d} renders={d}\n",
+            "reloads={d} mouse=({d:.1}, {d:.1}) rect=({d:.1}, {d:.1}) dragging={d}\n",
             .{
                 state.reload_count,
-                ctx.input.client_width,
-                ctx.input.client_height,
-                state.counter,
-                state.update_count,
-                state.render_count,
+                ctx.input.mouse_x,
+                ctx.input.mouse_y,
+                state.rect_x,
+                state.rect_y,
+                state.dragging,
             },
         );
     }
@@ -69,6 +143,7 @@ fn render(state: *abi.State, ctx: abi.TickContext, buffer: *const abi.SoftwareBu
 
 const api = abi.Api{
     .abi_version = abi.abi_version,
+    .module_state_size = @sizeOf(WorkState),
     .init = &init,
     .on_reload = &onReload,
     .update = &update,

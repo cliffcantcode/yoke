@@ -21,6 +21,9 @@ const HCURSOR = HANDLE;
 const HBRUSH = HANDLE;
 const HDC = HANDLE;
 
+const WM_MOUSEMOVE: UINT = 0x0200;
+const WM_LBUTTONDOWN: UINT = 0x0201;
+const WM_LBUTTONUP: UINT = 0x0202;
 const WM_KEYDOWN: UINT = 0x0100;
 const WM_KEYUP: UINT = 0x0101;
 const WM_SYSKEYDOWN: UINT = 0x0104;
@@ -80,6 +83,9 @@ const BITMAPINFO = extern struct {
 
 extern "user32" fn GetDC(hwnd: HWND) callconv(.winapi) HDC;
 extern "user32" fn ReleaseDC(hwnd: HWND, hdc: HDC) callconv(.winapi) INT;
+
+extern "user32" fn SetCapture(hwnd: HWND) callconv(.winapi) HWND;
+extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
 
 extern "gdi32" fn StretchDIBits(
     hdc: HDC,
@@ -247,7 +253,7 @@ const Win32OffscreenBuffer = struct {
         self.info.bmiHeader.biSizeImage = @intCast(size);
     }
 
-    fn toAbi(self: *Win32OffscreenBuffer) abi.SoftwareBuffer {
+    fn toAbi(self: *Win32OffscreenBuffer) abi.PixelBuffer {
         return .{
             .memory = self.memory.ptr,
             .width = self.width,
@@ -298,14 +304,39 @@ fn windowProc(hwnd: HWND, msg: UINT, w_param: WPARAM, l_param: LPARAM) callconv(
             PostQuitMessage(0);
             return 0;
         },
+
         WM_KEYDOWN, WM_SYSKEYDOWN => {
             handleVirtualKey(@intCast(w_param), true);
             return 0;
         },
+
         WM_KEYUP, WM_SYSKEYUP => {
             handleVirtualKey(@intCast(w_param), false);
             return 0;
         },
+
+        WM_MOUSEMOVE => {
+            g_input_state.mouse_x_win32 = lowS16(l_param);
+            g_input_state.mouse_y_win32 = highS16(l_param);
+            return 0;
+        },
+
+        WM_LBUTTONDOWN => {
+            g_input_state.mouse_x_win32 = lowS16(l_param);
+            g_input_state.mouse_y_win32 = highS16(l_param);
+            updateButton(&g_input_state.mouse_left, true);
+            _ = SetCapture(hwnd);
+            return 0;
+        },
+
+        WM_LBUTTONUP => {
+            g_input_state.mouse_x_win32 = lowS16(l_param);
+            g_input_state.mouse_y_win32 = highS16(l_param);
+            updateButton(&g_input_state.mouse_left, false);
+            _ = ReleaseCapture();
+            return 0;
+        },
+
         else => return DefWindowProcA(hwnd, msg, w_param, l_param),
     }
 }
@@ -453,7 +484,11 @@ const ModuleLoader = struct {
         self.files.deinit(allocator);
     }
 
-    fn maybeReload(self: *ModuleLoader, state: *abi.State) !void {
+    fn maybeReload(
+        self: *ModuleLoader,
+        allocator: std.mem.Allocator,
+        module_state: *ModuleStateStorage,
+    ) !void {
         const newest = getModuleStamp(&self.files) catch |err| switch (err) {
             error.FileNotFound, error.AccessDenied => return,
             else => return err,
@@ -473,8 +508,15 @@ const ModuleLoader = struct {
         self.current_is_a = !self.current_is_a;
         self.last_seen = newest;
 
-        self.current.api.on_reload(state);
-        std.debug.print("reloaded {s}\n", .{module_name});
+        const state_was_reset = try module_state.ensureSize(allocator, self.current.api.module_state_size);
+
+        if (state_was_reset) {
+            self.current.api.init(module_state.ptr());
+            std.debug.print("reloaded {s} (module state reset)\n", .{module_name});
+        } else {
+            self.current.api.on_reload(module_state.ptr());
+            std.debug.print("reloaded {s}\n", .{module_name});
+        }
     }
 };
 
@@ -523,17 +565,70 @@ const HostButtonState = struct {
 
 const HostInputState = struct {
     quit_requested: bool = false,
+
+    mouse_x_win32: i32 = 0,
+    mouse_y_win32: i32 = 0,
+
     escape: HostButtonState = .{},
     space: HostButtonState = .{},
+    mouse_left: HostButtonState = .{},
 };
 
 var g_input_state: HostInputState = .{};
+
+const ModuleStateStorage = struct {
+    memory: []align(abi.module_state_alignment) u8 = &.{},
+    logical_size: u32 = 0,
+
+    fn deinit(self: *ModuleStateStorage, allocator: std.mem.Allocator) void {
+        if (self.memory.len != 0) {
+            allocator.free(self.memory);
+            self.memory = &.{};
+        }
+        self.logical_size = 0;
+    }
+
+    fn ensureSize(self: *ModuleStateStorage, allocator: std.mem.Allocator, size: u32) !bool {
+        if (self.logical_size == size) return false;
+
+        if (self.memory.len != 0) {
+            allocator.free(self.memory);
+            self.memory = &.{};
+        }
+
+        const alloc_size: usize = if (size == 0) 1 else size;
+
+        self.memory = try allocator.alignedAlloc(
+            u8,
+            .fromByteUnits(abi.module_state_alignment),
+            alloc_size,
+        );
+        @memset(self.memory, 0);
+
+        self.logical_size = size;
+        return true;
+    }
+
+    fn ptr(self: *ModuleStateStorage) *anyopaque {
+        return @ptrCast(self.memory.ptr);
+    }
+};
 
 fn updateButton(button: *HostButtonState, is_down: bool) void {
     if (button.is_down != is_down) {
         button.is_down = is_down;
         button.changed = true;
     }
+}
+
+fn lowS16(l_param: LPARAM) i16 {
+    const raw: usize = @bitCast(l_param);
+    return @bitCast(@as(u16, @truncate(raw)));
+}
+
+fn highS16(l_param: LPARAM) i16 {
+    const raw: usize = @bitCast(l_param);
+    return @bitCast(@as(u16, @truncate(raw >> 16)));
 }
 
 fn handleVirtualKey(vk: UINT, is_down: bool) void {
@@ -547,6 +642,7 @@ fn handleVirtualKey(vk: UINT, is_down: bool) void {
 fn clearInputTransitions() void {
     g_input_state.escape.changed = false;
     g_input_state.space.changed = false;
+    g_input_state.mouse_left.changed = false;
 }
 
 fn snapshotInput(window: HWND) !abi.Input {
@@ -555,13 +651,28 @@ fn snapshotInput(window: HWND) !abi.Input {
         return error.GetClientRectFailed;
     }
 
-    const width: u32 = if (rect.right > 0) @intCast(rect.right) else 0;
-    const height: u32 = if (rect.bottom > 0) @intCast(rect.bottom) else 0;
+    const width_i32: i32 = if (rect.right > rect.left) rect.right - rect.left else 0;
+    const height_i32: i32 = if (rect.bottom > rect.top) rect.bottom - rect.top else 0;
+
+    const max_x = @max(width_i32 - 1, 0);
+    const max_y = @max(height_i32 - 1, 0);
+
+    const clamped_x = std.math.clamp(g_input_state.mouse_x_win32, 0, max_x);
+    const clamped_y_top = std.math.clamp(g_input_state.mouse_y_win32, 0, max_y);
+
+    const y_bottom: i32 = if (height_i32 > 0)
+        height_i32 - 1 - clamped_y_top
+    else
+        0;
 
     return .{
         .quit_requested = @intFromBool(g_input_state.quit_requested),
-        .client_width = width,
-        .client_height = height,
+        .client_width = @intCast(width_i32),
+        .client_height = @intCast(height_i32),
+
+        .mouse_x = @as(f32, @floatFromInt(clamped_x)),
+        .mouse_y = @as(f32, @floatFromInt(y_bottom)),
+
         .escape = .{
             .is_down = @intFromBool(g_input_state.escape.is_down),
             .changed = @intFromBool(g_input_state.escape.changed),
@@ -570,7 +681,81 @@ fn snapshotInput(window: HWND) !abi.Input {
             .is_down = @intFromBool(g_input_state.space.is_down),
             .changed = @intFromBool(g_input_state.space.changed),
         },
+        .mouse_left = .{
+            .is_down = @intFromBool(g_input_state.mouse_left.is_down),
+            .changed = @intFromBool(g_input_state.mouse_left.changed),
+        },
     };
+}
+
+fn backbufferClear(buffer: *Win32OffscreenBuffer, color: u32) void {
+    var y: u32 = 0;
+    while (y < buffer.height) : (y += 1) {
+        const row_base = buffer.memory.ptr + @as(usize, y) * @as(usize, buffer.pitch);
+        const row: [*]u32 = @ptrCast(@alignCast(row_base));
+
+        var x: u32 = 0;
+        while (x < buffer.width) : (x += 1) {
+            row[x] = color;
+        }
+    }
+}
+
+fn backbufferFillRect(
+    buffer: *Win32OffscreenBuffer,
+    x0_in: i32,
+    y0_in: i32,
+    x1_in: i32,
+    y1_in: i32,
+    color: u32,
+) void {
+    const max_x: i32 = @intCast(buffer.width);
+    const max_y: i32 = @intCast(buffer.height);
+
+    const x0 = std.math.clamp(x0_in, 0, max_x);
+    const y0 = std.math.clamp(y0_in, 0, max_y);
+    const x1 = std.math.clamp(x1_in, 0, max_x);
+    const y1 = std.math.clamp(y1_in, 0, max_y);
+
+    if (x0 >= x1 or y0 >= y1) return;
+
+    var y = y0;
+    while (y < y1) : (y += 1) {
+        const row_base = buffer.memory.ptr + @as(usize, @intCast(y)) * @as(usize, buffer.pitch);
+        const row: [*]u32 = @ptrCast(@alignCast(row_base));
+
+        var x = x0;
+        while (x < x1) : (x += 1) {
+            row[@as(usize, @intCast(x))] = color;
+        }
+    }
+}
+
+fn executeRenderCommands(
+    buffer: *Win32OffscreenBuffer,
+    frame: *const abi.Frame,
+) void {
+    var i: u32 = 0;
+    while (i < frame.command_buffer.count) : (i += 1) {
+        const cmd = frame.command_buffer.commands[i];
+        const kind: abi.RenderCommandKind = @enumFromInt(cmd.kind);
+
+        switch (kind) {
+            .clear => {
+                backbufferClear(buffer, cmd.color);
+            },
+            .fill_rect => {
+                backbufferFillRect(
+                    buffer,
+                    @intFromFloat(cmd.x0),
+                    @intFromFloat(cmd.y0),
+                    @intFromFloat(cmd.x1),
+                    @intFromFloat(cmd.y1),
+                    cmd.color,
+                );
+            },
+        }
+    }
 }
 
 pub fn main() !void {
@@ -580,11 +765,14 @@ pub fn main() !void {
     var loader = try ModuleLoader.init(allocator);
     defer loader.deinit(allocator);
 
+    var module_state = ModuleStateStorage{};
+    defer module_state.deinit(allocator);
+
+    _ = try module_state.ensureSize(allocator, loader.current.api.module_state_size);
+    loader.current.api.init(module_state.ptr());
+
     var backbuffer = Win32OffscreenBuffer{};
     defer backbuffer.deinit(allocator);
-
-    var state: abi.State = .{};
-    loader.current.api.init(&state);
 
     const window = try createMainWindow();
 
@@ -602,6 +790,8 @@ pub fn main() !void {
         .{ update_hz, render_hz, module_name },
     );
 
+    var render_commands: [1024]abi.RenderCommand = undefined;
+
     while (true) {
         if (!pumpMessages()) break;
 
@@ -610,7 +800,7 @@ pub fn main() !void {
         last_ticks = now_ticks;
         frame_ns = @min(frame_ns, max_frame_ns);
 
-        try loader.maybeReload(&state);
+        try loader.maybeReload(allocator, &module_state);
 
         const frame_input = try snapshotInput(window);
         try backbuffer.resize(allocator, frame_input.client_width, frame_input.client_height);
@@ -619,19 +809,14 @@ pub fn main() !void {
         render_accum += frame_ns;
 
         var caught_up: u32 = 0;
-        var update_input = frame_input;
 
         while (update_accum >= update_step_ns and caught_up < max_catchup_updates) : (caught_up += 1) {
             update_tick += 1;
-            loader.current.api.update(&state, .{
+            loader.current.api.update(module_state.ptr(), .{
                 .dt_ns = update_step_ns,
                 .tick_index = update_tick,
-                .input = update_input,
+                .input = frame_input,
             });
-
-            update_input.escape.changed = 0;
-            update_input.space.changed = 0;
-
             update_accum -= update_step_ns;
         }
 
@@ -639,26 +824,33 @@ pub fn main() !void {
             update_accum %= update_step_ns;
         }
 
-        if (render_accum >= render_step_ns) {
-            var render_input = frame_input;
-            render_input.escape.changed = 0;
-            render_input.space.changed = 0;
-
+        const is_empty_backbuffer = (backbuffer.memory.len == 0);
+        if ((render_accum >= render_step_ns) and !is_empty_backbuffer) {
             render_tick += 1;
 
-            const render_buffer = backbuffer.toAbi();
-            loader.current.api.render(&state, .{
+            var frame = abi.Frame{
+                .target = .{
+                    .width = backbuffer.width,
+                    .height = backbuffer.height,
+                },
+                .command_buffer = .{
+                    .commands = &render_commands,
+                    .count = 0,
+                    .capacity = render_commands.len,
+                },
+            };
+
+            loader.current.api.render(module_state.ptr(), .{
                 .dt_ns = render_step_ns,
                 .tick_index = render_tick,
-                .input = render_input,
-            }, &render_buffer);
+                .input = frame_input,
+            }, &frame);
 
+            executeRenderCommands(&backbuffer, &frame);
             try presentBackbuffer(window, &backbuffer);
 
             render_accum %= render_step_ns;
         }
-
-        clearInputTransitions();
 
         const until_update = update_step_ns - update_accum;
         const until_render = render_step_ns - render_accum;

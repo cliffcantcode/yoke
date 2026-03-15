@@ -25,7 +25,16 @@ pub fn build(b: *std.Build) void {
     });
     exe.linkSystemLibrary("user32");
     exe.linkSystemLibrary("gdi32");
-    b.installArtifact(exe);
+
+    const install_work_mod = b.addInstallArtifact(work_mod, .{});
+    const install_exe = b.addInstallArtifact(exe, .{});
+
+    b.getInstallStep().dependOn(&install_work_mod.step);
+    b.getInstallStep().dependOn(&install_exe.step);
+
+    // A build path dedicated to hot-reloaded so that results can be seen faster.
+    const hot_step = b.step("hot", "Build/install only the module to be hot-reloaded.");
+    hot_step.dependOn(&install_work_mod.step);
 
     const run_step = b.step("run", "Run the app");
 
