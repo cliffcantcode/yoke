@@ -1,49 +1,26 @@
 const std = @import("std");
+const bs = @import("build_support.zig");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const options = bs.standardOptions(b);
 
-    const work_mod = b.addLibrary(.{
-        .name = "work_module",
-        .linkage = .dynamic,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/work_module.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    b.installArtifact(work_mod);
+    const work_mod = bs.addHotModule(
+        b,
+        "work_module",
+        b.path("src/work_module.zig"),
+        options,
+    );
 
-    const exe = b.addExecutable(.{
-        .name = "yoke_win32",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/yoke_win32.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    exe.linkSystemLibrary("user32");
-    exe.linkSystemLibrary("gdi32");
+    const exe = bs.addWin32Executable(
+        b,
+        "yoke_win32",
+        b.path("src/yoke_win32.zig"),
+        options,
+    );
 
-    const install_work_mod = b.addInstallArtifact(work_mod, .{});
-    const install_exe = b.addInstallArtifact(exe, .{});
-
-    b.getInstallStep().dependOn(&install_work_mod.step);
-    b.getInstallStep().dependOn(&install_exe.step);
-
-    // A build path dedicated to hot-reloaded so that results can be seen faster.
-    const hot_step = b.step("hot", "Build/install only the module to be hot-reloaded.");
-    hot_step.dependOn(&install_work_mod.step);
-
-    const run_step = b.step("run", "Run the app");
-
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    const artifacts = [_]*std.Build.Step.Compile{ work_mod, exe };
+    bs.installArtifacts(b, artifacts[0..]);
+    bs.addHotStep(b, "hot", "Build/install only work_module.", work_mod);
+    bs.addRunInstalledArtifact(b, exe, "run", "Run yoke_win32.");
 }
 

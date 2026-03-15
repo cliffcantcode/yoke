@@ -3,7 +3,6 @@ const abi = @import("abi.zig");
 
 const WorkState = struct {
     reload_count: u32 = 0,
-
     update_count: u64 = 0,
     render_count: u64 = 0,
 
@@ -13,8 +12,10 @@ const WorkState = struct {
     rect_h: f32 = 140,
 
     dragging: u8 = 0,
-    drag_offset_x: f32 = 0,
-    drag_offset_y: f32 = 0,
+    drag_start_mouse_x: f32 = 0,
+    drag_start_mouse_y: f32 = 0,
+    drag_start_rect_x: f32 = 0,
+    drag_start_rect_y: f32 = 0,
 };
 
 comptime {
@@ -51,19 +52,19 @@ fn update(module_state: *anyopaque, ctx: abi.TickContext) callconv(.c) void {
         state.dragging = 0;
     }
 
-    if (abi.buttonPressed(ctx.input.mouse_left)) {
-        if (pointInRect(
-            ctx.input.mouse_x,
-            ctx.input.mouse_y,
-            state.rect_x,
-            state.rect_y,
-            state.rect_w,
-            state.rect_h,
-        )) {
-            state.dragging = 1;
-            state.drag_offset_x = ctx.input.mouse_x - state.rect_x;
-            state.drag_offset_y = ctx.input.mouse_y - state.rect_y;
-        }
+    if (abi.buttonPressed(ctx.input.mouse_left) and pointInRect(
+        ctx.input.mouse_x,
+        ctx.input.mouse_y,
+        state.rect_x,
+        state.rect_y,
+        state.rect_w,
+        state.rect_h,
+    )) {
+        state.dragging = 1;
+        state.drag_start_mouse_x = ctx.input.mouse_x;
+        state.drag_start_mouse_y = ctx.input.mouse_y;
+        state.drag_start_rect_x = state.rect_x;
+        state.drag_start_rect_y = state.rect_y;
     }
 
     if (abi.buttonReleased(ctx.input.mouse_left)) {
@@ -71,14 +72,20 @@ fn update(module_state: *anyopaque, ctx: abi.TickContext) callconv(.c) void {
     }
 
     if (state.dragging != 0 and ctx.input.mouse_left.is_down != 0) {
-        state.rect_x = ctx.input.mouse_x - state.drag_offset_x;
-        state.rect_y = ctx.input.mouse_y - state.drag_offset_y;
+        const delta_x = ctx.input.mouse_x - state.drag_start_mouse_x;
+        const delta_y = ctx.input.mouse_y - state.drag_start_mouse_y;
+
+        var next_x = state.drag_start_rect_x + delta_x;
+        var next_y = state.drag_start_rect_y + delta_y;
 
         const max_x = @max(@as(f32, @floatFromInt(ctx.input.client_width)) - state.rect_w, 0.0);
         const max_y = @max(@as(f32, @floatFromInt(ctx.input.client_height)) - state.rect_h, 0.0);
 
-        state.rect_x = std.math.clamp(state.rect_x, 0.0, max_x);
-        state.rect_y = std.math.clamp(state.rect_y, 0.0, max_y);
+        next_x = std.math.clamp(next_x, 0.0, max_x);
+        next_y = std.math.clamp(next_y, 0.0, max_y);
+
+        state.rect_x = next_x;
+        state.rect_y = next_y;
     }
 }
 
@@ -87,8 +94,6 @@ fn render(module_state: *anyopaque, ctx: abi.TickContext, frame: *abi.Frame) cal
     state.render_count += 1;
 
     abi.clear(frame, abi.RGB(18, 18, 26));
-
-    // origin marker
     abi.fillRect(frame, 0, 0, 24, 24, abi.RGB(255, 80, 80));
 
     const hovering = pointInRect(
@@ -116,7 +121,6 @@ fn render(module_state: *anyopaque, ctx: abi.TickContext, frame: *abi.Frame) cal
         rect_color,
     );
 
-    // tiny mouse marker
     abi.fillRect(
         frame,
         ctx.input.mouse_x - 3,

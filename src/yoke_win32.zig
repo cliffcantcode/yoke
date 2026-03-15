@@ -1,5 +1,7 @@
 const std = @import("std");
 const abi = @import("abi.zig");
+const hot_reload = @import("runtime/hot_reload.zig");
+const module_state = @import("runtime/module_state.zig");
 
 const BOOL = i32;
 const UINT = u32;
@@ -28,9 +30,36 @@ const WM_KEYDOWN: UINT = 0x0100;
 const WM_KEYUP: UINT = 0x0101;
 const WM_SYSKEYDOWN: UINT = 0x0104;
 const WM_SYSKEYUP: UINT = 0x0105;
+const WM_DESTROY: UINT = 0x0002;
+const WM_QUIT: UINT = 0x0012;
+const PM_REMOVE: UINT = 0x0001;
 
 const VK_ESCAPE: UINT = 0x1B;
 const VK_SPACE: UINT = 0x20;
+
+const BI_RGB: DWORD = 0;
+const DIB_RGB_COLORS: UINT = 0;
+const SRCCOPY: DWORD = 0x00CC0020;
+const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+
+const WS_OVERLAPPED: DWORD = 0x00000000;
+const WS_CAPTION: DWORD = 0x00C00000;
+const WS_SYSMENU: DWORD = 0x00080000;
+const WS_THICKFRAME: DWORD = 0x00040000;
+const WS_MINIMIZEBOX: DWORD = 0x00020000;
+const WS_MAXIMIZEBOX: DWORD = 0x00010000;
+const WS_VISIBLE: DWORD = 0x10000000;
+const WS_OVERLAPPEDWINDOW: DWORD =
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+
+const SW_SHOW: INT = 5;
+const CW_USEDEFAULT: INT = @as(INT, @bitCast(@as(u32, 0x80000000)));
+
+const update_hz: u32 = 60;
+const render_hz: u32 = 60;
+const max_frame_ns: u64 = 250 * std.time.ns_per_ms;
+const max_catchup_updates: u32 = 8;
+const max_render_commands = 1024;
 
 const POINT = extern struct {
     x: LONG,
@@ -44,7 +73,6 @@ const RECT = extern struct {
     bottom: LONG,
 };
 
-extern "user32" fn GetClientRect(handle: HWND, rect: *RECT) callconv(.winapi) BOOL;
 const MSG = extern struct {
     hwnd: HWND,
     message: UINT,
@@ -81,32 +109,6 @@ const BITMAPINFO = extern struct {
     bmiColors: [1]RGBQUAD,
 };
 
-extern "user32" fn GetDC(hwnd: HWND) callconv(.winapi) HDC;
-extern "user32" fn ReleaseDC(hwnd: HWND, hdc: HDC) callconv(.winapi) INT;
-
-extern "user32" fn SetCapture(hwnd: HWND) callconv(.winapi) HWND;
-extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
-
-extern "gdi32" fn StretchDIBits(
-    hdc: HDC,
-    x_dest: INT,
-    y_dest: INT,
-    dest_width: INT,
-    dest_height: INT,
-    x_src: INT,
-    y_src: INT,
-    src_width: INT,
-    src_height: INT,
-    bits: ?*const anyopaque,
-    bits_info: *const BITMAPINFO,
-    usage: UINT,
-    rop: DWORD,
-) callconv(.winapi) INT;
-
-const BI_RGB: DWORD = 0;
-const DIB_RGB_COLORS: UINT = 0;
-const SRCCOPY: DWORD = 0x00CC0020;
-
 const WNDPROC = *const fn (
     hwnd: HWND,
     msg: UINT,
@@ -124,17 +126,19 @@ const WNDCLASSA = extern struct {
     hCursor: HCURSOR,
     hbrBackground: HBRUSH,
     lpszMenuName: ?[*:0]const u8,
-    lpszClassName: ?[*:0]const u8,
+    lpszClassName: [*:0]const u8,
 };
 
 extern "kernel32" fn GetModuleHandleA(name: ?[*:0]const u8) callconv(.winapi) HINSTANCE;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+extern "kernel32" fn QueryPerformanceCounter(performance_count: *i64) callconv(.winapi) i32;
+extern "kernel32" fn QueryPerformanceFrequency(frequency: *i64) callconv(.winapi) i32;
 
 extern "user32" fn RegisterClassA(wnd_class: *const WNDCLASSA) callconv(.winapi) ATOM;
 extern "user32" fn CreateWindowExA(
     ex_style: DWORD,
-    class_name: ?[*:0]const u8,
-    window_name: ?[*:0]const u8,
+    class_name: [*:0]const u8,
+    window_name: [*:0]const u8,
     style: DWORD,
     x: INT,
     y: INT,
@@ -163,29 +167,70 @@ extern "user32" fn DefWindowProcA(
     l_param: LPARAM,
 ) callconv(.winapi) LRESULT;
 extern "user32" fn PostQuitMessage(exit_code: INT) callconv(.winapi) void;
+extern "user32" fn GetClientRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
+extern "user32" fn GetDC(hwnd: HWND) callconv(.winapi) HDC;
+extern "user32" fn ReleaseDC(hwnd: HWND, hdc: HDC) callconv(.winapi) INT;
+extern "user32" fn SetCapture(hwnd: HWND) callconv(.winapi) HWND;
+extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
 
-const WM_DESTROY: UINT = 0x0002;
-const WM_QUIT: UINT = 0x0012;
-const PM_REMOVE: UINT = 0x0001;
+extern "gdi32" fn StretchDIBits(
+    hdc: HDC,
+    x_dest: INT,
+    y_dest: INT,
+    dest_width: INT,
+    dest_height: INT,
+    x_src: INT,
+    y_src: INT,
+    src_width: INT,
+    src_height: INT,
+    bits: ?*const anyopaque,
+    bits_info: *const BITMAPINFO,
+    usage: UINT,
+    rop: DWORD,
+) callconv(.winapi) INT;
 
-const WS_OVERLAPPED: DWORD = 0x00000000;
-const WS_CAPTION: DWORD = 0x00C00000;
-const WS_SYSMENU: DWORD = 0x00080000;
-const WS_THICKFRAME: DWORD = 0x00040000;
-const WS_MINIMIZEBOX: DWORD = 0x00020000;
-const WS_MAXIMIZEBOX: DWORD = 0x00010000;
-const WS_VISIBLE: DWORD = 0x10000000;
-const WS_OVERLAPPEDWINDOW: DWORD =
-    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+const Clock = struct {
+    freq: u64,
 
-const SW_SHOW: INT = 5;
-const CW_USEDEFAULT: INT = @as(INT, @bitCast(@as(u32, 0x80000000)));
-const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+    fn init() !Clock {
+        var freq: i64 = 0;
+        if (QueryPerformanceFrequency(&freq) == 0 or freq <= 0) {
+            return error.QueryPerformanceFrequencyFailed;
+        }
+        return .{ .freq = @as(u64, @intCast(freq)) };
+    }
 
-extern "kernel32" fn QueryPerformanceCounter(performance_count: *i64) callconv(.winapi) i32;
-extern "kernel32" fn QueryPerformanceFrequency(frequency: *i64) callconv(.winapi) i32;
+    fn nowTicks(_: *const Clock) !u64 {
+        var ticks: i64 = 0;
+        if (QueryPerformanceCounter(&ticks) == 0 or ticks < 0) {
+            return error.QueryPerformanceCounterFailed;
+        }
+        return @as(u64, @intCast(ticks));
+    }
 
-const Win32OffscreenBuffer = struct {
+    fn deltaNs(self: *const Clock, earlier: u64, later: u64) u64 {
+        const delta_ticks = later - earlier;
+        return @as(u64, @intCast((@as(u128, delta_ticks) * std.time.ns_per_s) / self.freq));
+    }
+};
+
+const HostButtonState = struct {
+    is_down: bool = false,
+    changed: bool = false,
+};
+
+const HostInputState = struct {
+    quit_requested: bool = false,
+    mouse_x_win32: i32 = 0,
+    mouse_y_win32: i32 = 0,
+    escape: HostButtonState = .{},
+    space: HostButtonState = .{},
+    mouse_left: HostButtonState = .{},
+};
+
+var g_input_state: HostInputState = .{};
+
+const Win32Backbuffer = struct {
     info: BITMAPINFO = .{
         .bmiHeader = .{
             .biSize = @intCast(@sizeOf(BITMAPINFOHEADER)),
@@ -214,14 +259,14 @@ const Win32OffscreenBuffer = struct {
     pitch: u32 = 0,
     bytes_per_pixel: u32 = 4,
 
-    fn deinit(self: *Win32OffscreenBuffer, allocator: std.mem.Allocator) void {
+    fn deinit(self: *Win32Backbuffer, allocator: std.mem.Allocator) void {
         if (self.memory.len != 0) {
             allocator.free(self.memory);
             self.memory = &.{};
         }
     }
 
-    fn resize(self: *Win32OffscreenBuffer, allocator: std.mem.Allocator, width: u32, height: u32) !void {
+    fn resize(self: *Win32Backbuffer, allocator: std.mem.Allocator, width: u32, height: u32) !void {
         if (self.width == width and self.height == height) return;
 
         if (self.memory.len != 0) {
@@ -240,31 +285,70 @@ const Win32OffscreenBuffer = struct {
             return;
         }
 
-        const size =
-            @as(usize, width) *
-            @as(usize, height) *
-            @as(usize, self.bytes_per_pixel);
-
+        const size = @as(usize, width) * @as(usize, height) * @as(usize, self.bytes_per_pixel);
         self.memory = try allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(u32)), size);
         @memset(self.memory, 0);
 
-        self.info.bmiHeader.biWidth = @intCast(width);
+        self.info.bmiHeader.biWidth = @as(LONG, @intCast(width));
         self.info.bmiHeader.biHeight = @as(LONG, @intCast(height));
         self.info.bmiHeader.biSizeImage = @intCast(size);
     }
-
-    fn toAbi(self: *Win32OffscreenBuffer) abi.PixelBuffer {
-        return .{
-            .memory = self.memory.ptr,
-            .width = self.width,
-            .height = self.height,
-            .pitch = self.pitch,
-            .bytes_per_pixel = self.bytes_per_pixel,
-        };
-    }
 };
 
-fn presentBackbuffer(window: HWND, buffer: *const Win32OffscreenBuffer) !void {
+fn backbufferClear(buffer: *Win32Backbuffer, color: u32) void {
+    var y: u32 = 0;
+    while (y < buffer.height) : (y += 1) {
+        const row_base = buffer.memory.ptr + @as(usize, y) * @as(usize, buffer.pitch);
+        const row: [*]u32 = @ptrCast(@alignCast(row_base));
+        var x: u32 = 0;
+        while (x < buffer.width) : (x += 1) {
+            row[x] = color;
+        }
+    }
+}
+
+fn backbufferFillRect(buffer: *Win32Backbuffer, x0_in: i32, y0_in: i32, x1_in: i32, y1_in: i32, color: u32) void {
+    const max_x: i32 = @intCast(buffer.width);
+    const max_y: i32 = @intCast(buffer.height);
+
+    const x0 = std.math.clamp(x0_in, 0, max_x);
+    const y0 = std.math.clamp(y0_in, 0, max_y);
+    const x1 = std.math.clamp(x1_in, 0, max_x);
+    const y1 = std.math.clamp(y1_in, 0, max_y);
+
+    if (x0 >= x1 or y0 >= y1) return;
+
+    var y = y0;
+    while (y < y1) : (y += 1) {
+        const row_base = buffer.memory.ptr + @as(usize, @intCast(y)) * @as(usize, buffer.pitch);
+        const row: [*]u32 = @ptrCast(@alignCast(row_base));
+        var x = x0;
+        while (x < x1) : (x += 1) {
+            row[@as(usize, @intCast(x))] = color;
+        }
+    }
+}
+
+fn executeRenderCommands(buffer: *Win32Backbuffer, frame: *const abi.Frame) void {
+    var i: u32 = 0;
+    while (i < frame.command_buffer.count) : (i += 1) {
+        const cmd = frame.command_buffer.commands[i];
+        const kind: abi.RenderCommandKind = @enumFromInt(cmd.kind);
+        switch (kind) {
+            .clear => backbufferClear(buffer, cmd.color),
+            .fill_rect => backbufferFillRect(
+                buffer,
+                @intFromFloat(cmd.x0),
+                @intFromFloat(cmd.y0),
+                @intFromFloat(cmd.x1),
+                @intFromFloat(cmd.y1),
+                cmd.color,
+            ),
+        }
+    }
+}
+
+fn presentBackbuffer(window: HWND, buffer: *const Win32Backbuffer) !void {
     if (buffer.memory.len == 0) return;
 
     const dc = GetDC(window) orelse return error.GetDCFailed;
@@ -287,337 +371,18 @@ fn presentBackbuffer(window: HWND, buffer: *const Win32OffscreenBuffer) !void {
     );
 }
 
-const module_name = "work_module.dll";
-const loaded_a_name = "work_module_loaded_a.dll";
-const loaded_b_name = "work_module_loaded_b.dll";
-
-const update_hz: u32 = 60;
-const render_hz: u32 = 60;
-
-const max_frame_ns: u64 = 250 * std.time.ns_per_ms;
-const max_catchup_updates: u32 = 8;
-
-fn windowProc(hwnd: HWND, msg: UINT, w_param: WPARAM, l_param: LPARAM) callconv(.winapi) LRESULT {
-    switch (msg) {
-        WM_DESTROY => {
-            g_input_state.quit_requested = true;
-            PostQuitMessage(0);
-            return 0;
-        },
-
-        WM_KEYDOWN, WM_SYSKEYDOWN => {
-            handleVirtualKey(@intCast(w_param), true);
-            return 0;
-        },
-
-        WM_KEYUP, WM_SYSKEYUP => {
-            handleVirtualKey(@intCast(w_param), false);
-            return 0;
-        },
-
-        WM_MOUSEMOVE => {
-            g_input_state.mouse_x_win32 = lowS16(l_param);
-            g_input_state.mouse_y_win32 = highS16(l_param);
-            return 0;
-        },
-
-        WM_LBUTTONDOWN => {
-            g_input_state.mouse_x_win32 = lowS16(l_param);
-            g_input_state.mouse_y_win32 = highS16(l_param);
-            updateButton(&g_input_state.mouse_left, true);
-            _ = SetCapture(hwnd);
-            return 0;
-        },
-
-        WM_LBUTTONUP => {
-            g_input_state.mouse_x_win32 = lowS16(l_param);
-            g_input_state.mouse_y_win32 = highS16(l_param);
-            updateButton(&g_input_state.mouse_left, false);
-            _ = ReleaseCapture();
-            return 0;
-        },
-
-        else => return DefWindowProcA(hwnd, msg, w_param, l_param),
-    }
-}
-
-fn createMainWindow() !HWND {
-    const class_name = "YokeWindowClass";
-    const window_title = "yoke";
-
-    const instance = GetModuleHandleA(null) orelse return error.GetModuleHandleFailed;
-
-    const wnd_class = WNDCLASSA{
-        .style = 0,
-        .lpfnWndProc = &windowProc,
-        .cbClsExtra = 0,
-        .cbWndExtra = 0,
-        .hInstance = instance,
-        .hIcon = null,
-        .hCursor = null,
-        .hbrBackground = null,
-        .lpszMenuName = null,
-        .lpszClassName = class_name,
-    };
-
-    if (RegisterClassA(&wnd_class) == 0) {
-        return error.RegisterClassFailed;
-    }
-
-    const hwnd = CreateWindowExA(
-        0,
-        class_name,
-        window_title,
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        1280,
-        720,
-        null,
-        null,
-        instance,
-        null,
-    ) orelse {
-        std.debug.print("CreateWindowExA failed: {d}\n", .{GetLastError()});
-        return error.CreateWindowFailed;
-    };
-
-    _ = ShowWindow(hwnd, SW_SHOW);
-    _ = UpdateWindow(hwnd);
-
-    return hwnd;
-}
-
-fn pumpMessages() bool {
-    var msg: MSG = undefined;
-
-    while (PeekMessageA(&msg, null, 0, 0, PM_REMOVE) != 0) {
-        if (msg.message == WM_QUIT) return false;
-        _ = TranslateMessage(&msg);
-        _ = DispatchMessageA(&msg);
-    }
-
-    return true;
-}
-
-const ModuleFiles = struct {
-    dir: std.fs.Dir,
-    dir_path: []const u8,
-
-    fn init(allocator: std.mem.Allocator) !ModuleFiles {
-        const dir_path = try std.fs.selfExeDirPathAlloc(allocator);
-        errdefer allocator.free(dir_path);
-
-        return .{
-            .dir = try std.fs.cwd().openDir(dir_path, .{}),
-            .dir_path = dir_path,
-        };
-    }
-
-    fn deinit(self: *ModuleFiles, allocator: std.mem.Allocator) void {
-        self.dir.close();
-        allocator.free(self.dir_path);
-    }
-
-    fn fullPath(self: *const ModuleFiles, buf: []u8, leaf: []const u8) ![]const u8 {
-        return std.fmt.bufPrint(buf, "{s}{s}{s}", .{
-            self.dir_path,
-            std.fs.path.sep_str,
-            leaf,
-        });
-    }
-};
-
-const Clock = struct {
-    freq: u64,
-
-    fn init() !Clock {
-        var freq: i64 = 0;
-        if (QueryPerformanceFrequency(&freq) == 0 or freq <= 0) {
-            return error.QueryPerformanceFrequencyFailed;
-        }
-        return .{ .freq = @as(u64, @intCast(freq)) };
-    }
-
-    fn nowTicks(_: *const Clock) !u64 {
-        var ticks: i64 = 0;
-        if (QueryPerformanceCounter(&ticks) == 0 or ticks < 0) {
-            return error.QueryPerformanceCounterFailed;
-        }
-        return @as(u64, @intCast(ticks));
-    }
-
-    fn deltaNs(self: *const Clock, earlier: u64, later: u64) u64 {
-        const delta_ticks = later - earlier;
-        return @as(u64, @intCast((@as(u128, delta_ticks) * std.time.ns_per_s) / self.freq));
-    }
-};
-
-const LoadedModule = struct {
-    lib: std.DynLib,
-    api: *const abi.Api,
-    fn close(self: *LoadedModule) void {
-        self.lib.close();
-    }
-};
-
-const ModuleLoader = struct {
-    files: ModuleFiles,
-    current_is_a: bool,
-    current: LoadedModule,
-    last_seen: std.fs.File.Stat,
-
-    fn init(allocator: std.mem.Allocator) !ModuleLoader {
-        var files = try ModuleFiles.init(allocator);
-        errdefer files.deinit(allocator);
-
-        return .{
-            .files = files,
-            .current_is_a = true,
-            .current = try loadModule(&files, loaded_a_name),
-            .last_seen = try getModuleStamp(&files),
-        };
-    }
-
-    fn deinit(self: *ModuleLoader, allocator: std.mem.Allocator) void {
-        self.current.close();
-        self.files.deinit(allocator);
-    }
-
-    fn maybeReload(
-        self: *ModuleLoader,
-        allocator: std.mem.Allocator,
-        module_state: *ModuleStateStorage,
-    ) !void {
-        const newest = getModuleStamp(&self.files) catch |err| switch (err) {
-            error.FileNotFound, error.AccessDenied => return,
-            else => return err,
-        };
-
-        if (sameStamp(newest, self.last_seen)) return;
-
-        const next_name = if (self.current_is_a) loaded_b_name else loaded_a_name;
-
-        const next = loadModule(&self.files, next_name) catch |err| switch (err) {
-            error.FileNotFound, error.AccessDenied => return,
-            else => return err,
-        };
-
-        self.current.close();
-        self.current = next;
-        self.current_is_a = !self.current_is_a;
-        self.last_seen = newest;
-
-        const state_was_reset = try module_state.ensureSize(allocator, self.current.api.module_state_size);
-
-        if (state_was_reset) {
-            self.current.api.init(module_state.ptr());
-            std.debug.print("reloaded {s} (module state reset)\n", .{module_name});
-        } else {
-            self.current.api.on_reload(module_state.ptr());
-            std.debug.print("reloaded {s}\n", .{module_name});
-        }
-    }
-};
-
-fn loadModule(files: *const ModuleFiles, temp_name: []const u8) !LoadedModule {
-    files.dir.deleteFile(temp_name) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
-
-    try files.dir.copyFile(module_name, files.dir, temp_name, .{});
-
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const temp_path = try files.fullPath(&path_buf, temp_name);
-
-    var lib = try std.DynLib.open(temp_path);
-    errdefer lib.close();
-
-    const get_api = lib.lookup(abi.GetApiFn, abi.symbols.get_api) orelse
-        return error.MissingSymbol;
-
-    const api = get_api();
-    if (api.abi_version != abi.abi_version) {
-        return error.IncompatibleAbi;
-    }
-
-    return .{
-        .lib = lib,
-        .api = api,
-    };
-}
-
-fn getModuleStamp(files: *const ModuleFiles) !std.fs.File.Stat {
-    var file = try files.dir.openFile(module_name, .{});
-    defer file.close();
-    return try file.stat();
-}
-
-fn sameStamp(a: std.fs.File.Stat, b: std.fs.File.Stat) bool {
-    return a.size == b.size and a.mtime == b.mtime;
-}
-
-const HostButtonState = struct {
-    is_down: bool = false,
-    changed: bool = false,
-};
-
-const HostInputState = struct {
-    quit_requested: bool = false,
-
-    mouse_x_win32: i32 = 0,
-    mouse_y_win32: i32 = 0,
-
-    escape: HostButtonState = .{},
-    space: HostButtonState = .{},
-    mouse_left: HostButtonState = .{},
-};
-
-var g_input_state: HostInputState = .{};
-
-const ModuleStateStorage = struct {
-    memory: []align(abi.module_state_alignment) u8 = &.{},
-    logical_size: u32 = 0,
-
-    fn deinit(self: *ModuleStateStorage, allocator: std.mem.Allocator) void {
-        if (self.memory.len != 0) {
-            allocator.free(self.memory);
-            self.memory = &.{};
-        }
-        self.logical_size = 0;
-    }
-
-    fn ensureSize(self: *ModuleStateStorage, allocator: std.mem.Allocator, size: u32) !bool {
-        if (self.logical_size == size) return false;
-
-        if (self.memory.len != 0) {
-            allocator.free(self.memory);
-            self.memory = &.{};
-        }
-
-        const alloc_size: usize = if (size == 0) 1 else size;
-
-        self.memory = try allocator.alignedAlloc(
-            u8,
-            .fromByteUnits(abi.module_state_alignment),
-            alloc_size,
-        );
-        @memset(self.memory, 0);
-
-        self.logical_size = size;
-        return true;
-    }
-
-    fn ptr(self: *ModuleStateStorage) *anyopaque {
-        return @ptrCast(self.memory.ptr);
-    }
-};
-
 fn updateButton(button: *HostButtonState, is_down: bool) void {
     if (button.is_down != is_down) {
         button.is_down = is_down;
         button.changed = true;
+    }
+}
+
+fn handleVirtualKey(vk: UINT, is_down: bool) void {
+    switch (vk) {
+        VK_ESCAPE => updateButton(&g_input_state.escape, is_down),
+        VK_SPACE => updateButton(&g_input_state.space, is_down),
+        else => {},
     }
 }
 
@@ -629,14 +394,6 @@ fn lowS16(l_param: LPARAM) i16 {
 fn highS16(l_param: LPARAM) i16 {
     const raw: usize = @bitCast(l_param);
     return @bitCast(@as(u16, @truncate(raw >> 16)));
-}
-
-fn handleVirtualKey(vk: UINT, is_down: bool) void {
-    switch (vk) {
-        VK_ESCAPE => updateButton(&g_input_state.escape, is_down),
-        VK_SPACE => updateButton(&g_input_state.space, is_down),
-        else => {},
-    }
 }
 
 fn clearInputTransitions() void {
@@ -659,20 +416,14 @@ fn snapshotInput(window: HWND) !abi.Input {
 
     const clamped_x = std.math.clamp(g_input_state.mouse_x_win32, 0, max_x);
     const clamped_y_top = std.math.clamp(g_input_state.mouse_y_win32, 0, max_y);
-
-    const y_bottom: i32 = if (height_i32 > 0)
-        height_i32 - 1 - clamped_y_top
-    else
-        0;
+    const y_bottom: i32 = if (height_i32 > 0) height_i32 - 1 - clamped_y_top else 0;
 
     return .{
         .quit_requested = @intFromBool(g_input_state.quit_requested),
         .client_width = @intCast(width_i32),
         .client_height = @intCast(height_i32),
-
         .mouse_x = @as(f32, @floatFromInt(clamped_x)),
         .mouse_y = @as(f32, @floatFromInt(y_bottom)),
-
         .escape = .{
             .is_down = @intFromBool(g_input_state.escape.is_down),
             .changed = @intFromBool(g_input_state.escape.changed),
@@ -688,90 +439,132 @@ fn snapshotInput(window: HWND) !abi.Input {
     };
 }
 
-fn backbufferClear(buffer: *Win32OffscreenBuffer, color: u32) void {
-    var y: u32 = 0;
-    while (y < buffer.height) : (y += 1) {
-        const row_base = buffer.memory.ptr + @as(usize, y) * @as(usize, buffer.pitch);
-        const row: [*]u32 = @ptrCast(@alignCast(row_base));
-
-        var x: u32 = 0;
-        while (x < buffer.width) : (x += 1) {
-            row[x] = color;
-        }
+fn windowProc(hwnd: HWND, msg: UINT, w_param: WPARAM, l_param: LPARAM) callconv(.winapi) LRESULT {
+    switch (msg) {
+        WM_DESTROY => {
+            g_input_state.quit_requested = true;
+            PostQuitMessage(0);
+            return 0;
+        },
+        WM_KEYDOWN, WM_SYSKEYDOWN => {
+            handleVirtualKey(@intCast(w_param), true);
+            return 0;
+        },
+        WM_KEYUP, WM_SYSKEYUP => {
+            handleVirtualKey(@intCast(w_param), false);
+            return 0;
+        },
+        WM_MOUSEMOVE => {
+            g_input_state.mouse_x_win32 = lowS16(l_param);
+            g_input_state.mouse_y_win32 = highS16(l_param);
+            return 0;
+        },
+        WM_LBUTTONDOWN => {
+            g_input_state.mouse_x_win32 = lowS16(l_param);
+            g_input_state.mouse_y_win32 = highS16(l_param);
+            updateButton(&g_input_state.mouse_left, true);
+            _ = SetCapture(hwnd);
+            return 0;
+        },
+        WM_LBUTTONUP => {
+            g_input_state.mouse_x_win32 = lowS16(l_param);
+            g_input_state.mouse_y_win32 = highS16(l_param);
+            updateButton(&g_input_state.mouse_left, false);
+            _ = ReleaseCapture();
+            return 0;
+        },
+        else => return DefWindowProcA(hwnd, msg, w_param, l_param),
     }
 }
 
-fn backbufferFillRect(
-    buffer: *Win32OffscreenBuffer,
-    x0_in: i32,
-    y0_in: i32,
-    x1_in: i32,
-    y1_in: i32,
-    color: u32,
-) void {
-    const max_x: i32 = @intCast(buffer.width);
-    const max_y: i32 = @intCast(buffer.height);
+fn createMainWindow() !HWND {
+    const class_name: [*:0]const u8 = "YokeWindowClass";
+    const window_title: [*:0]const u8 = "yoke_win32";
 
-    const x0 = std.math.clamp(x0_in, 0, max_x);
-    const y0 = std.math.clamp(y0_in, 0, max_y);
-    const x1 = std.math.clamp(x1_in, 0, max_x);
-    const y1 = std.math.clamp(y1_in, 0, max_y);
+    const instance = GetModuleHandleA(null) orelse return error.GetModuleHandleFailed;
 
-    if (x0 >= x1 or y0 >= y1) return;
+    const wnd_class = WNDCLASSA{
+        .style = 0,
+        .lpfnWndProc = &windowProc,
+        .cbClsExtra = 0,
+        .cbWndExtra = 0,
+        .hInstance = instance,
+        .hIcon = null,
+        .hCursor = null,
+        .hbrBackground = null,
+        .lpszMenuName = null,
+        .lpszClassName = class_name,
+    };
 
-    var y = y0;
-    while (y < y1) : (y += 1) {
-        const row_base = buffer.memory.ptr + @as(usize, @intCast(y)) * @as(usize, buffer.pitch);
-        const row: [*]u32 = @ptrCast(@alignCast(row_base));
-
-        var x = x0;
-        while (x < x1) : (x += 1) {
-            row[@as(usize, @intCast(x))] = color;
+    if (RegisterClassA(&wnd_class) == 0) {
+        const err = GetLastError();
+        if (err != ERROR_CLASS_ALREADY_EXISTS) {
+            return error.RegisterClassFailed;
         }
     }
+
+    const hwnd = CreateWindowExA(
+        0,
+        class_name,
+        window_title,
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        1280,
+        720,
+        null,
+        null,
+        instance,
+        null,
+    ) orelse return error.CreateWindowFailed;
+
+    _ = ShowWindow(hwnd, SW_SHOW);
+    _ = UpdateWindow(hwnd);
+    return hwnd;
 }
 
-fn executeRenderCommands(
-    buffer: *Win32OffscreenBuffer,
-    frame: *const abi.Frame,
-) void {
-    var i: u32 = 0;
-    while (i < frame.command_buffer.count) : (i += 1) {
-        const cmd = frame.command_buffer.commands[i];
-        const kind: abi.RenderCommandKind = @enumFromInt(cmd.kind);
-
-        switch (kind) {
-            .clear => {
-                backbufferClear(buffer, cmd.color);
-            },
-            .fill_rect => {
-                backbufferFillRect(
-                    buffer,
-                    @intFromFloat(cmd.x0),
-                    @intFromFloat(cmd.y0),
-                    @intFromFloat(cmd.x1),
-                    @intFromFloat(cmd.y1),
-                    cmd.color,
-                );
-            },
-        }
+fn pumpMessages() bool {
+    var msg: MSG = undefined;
+    while (PeekMessageA(&msg, null, 0, 0, PM_REMOVE) != 0) {
+        if (msg.message == WM_QUIT) return false;
+        _ = TranslateMessage(&msg);
+        _ = DispatchMessageA(&msg);
     }
+    return true;
+}
+
+fn syncModuleState(
+    allocator: std.mem.Allocator,
+    loader: *hot_reload.Loader,
+    storage: *module_state.Storage,
+    initial_load: bool,
+) !void {
+    const state_was_reset = try storage.ensureSize(allocator, loader.current.api.module_state_size);
+
+    if (initial_load or state_was_reset) {
+        loader.current.api.init(storage.ptr());
+        if (!initial_load and state_was_reset) {
+            std.debug.print("reloaded {s} (module state reset)\n", .{loader.config.module_name});
+        }
+        return;
+    }
+
+    loader.current.api.on_reload(storage.ptr());
+    std.debug.print("reloaded {s}\n", .{loader.config.module_name});
 }
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     var clock = try Clock.init();
-    var loader = try ModuleLoader.init(allocator);
+    var loader = try hot_reload.Loader.init(allocator, .{});
     defer loader.deinit(allocator);
 
-    var module_state = ModuleStateStorage{};
-    defer module_state.deinit(allocator);
+    var storage = module_state.Storage{};
+    defer storage.deinit(allocator);
+    try syncModuleState(allocator, &loader, &storage, true);
 
-    _ = try module_state.ensureSize(allocator, loader.current.api.module_state_size);
-    loader.current.api.init(module_state.ptr());
-
-    var backbuffer = Win32OffscreenBuffer{};
+    var backbuffer = Win32Backbuffer{};
     defer backbuffer.deinit(allocator);
 
     const window = try createMainWindow();
@@ -784,13 +577,12 @@ pub fn main() !void {
     var render_accum: u64 = 0;
     var update_tick: u64 = 0;
     var render_tick: u64 = 0;
+    var render_commands: [max_render_commands]abi.RenderCommand = undefined;
 
     std.debug.print(
         "yoke windows platform layer | update={d}Hz render={d}Hz | watching {s}\n",
-        .{ update_hz, render_hz, module_name },
+        .{ update_hz, render_hz, loader.config.module_name },
     );
-
-    var render_commands: [1024]abi.RenderCommand = undefined;
 
     while (true) {
         if (!pumpMessages()) break;
@@ -800,7 +592,9 @@ pub fn main() !void {
         last_ticks = now_ticks;
         frame_ns = @min(frame_ns, max_frame_ns);
 
-        try loader.maybeReload(allocator, &module_state);
+        if (try loader.maybeReload()) {
+            try syncModuleState(allocator, &loader, &storage, false);
+        }
 
         const frame_input = try snapshotInput(window);
         try backbuffer.resize(allocator, frame_input.client_width, frame_input.client_height);
@@ -809,14 +603,20 @@ pub fn main() !void {
         render_accum += frame_ns;
 
         var caught_up: u32 = 0;
+        var update_input = frame_input;
 
         while (update_accum >= update_step_ns and caught_up < max_catchup_updates) : (caught_up += 1) {
             update_tick += 1;
-            loader.current.api.update(module_state.ptr(), .{
+            loader.current.api.update(storage.ptr(), .{
                 .dt_ns = update_step_ns,
                 .tick_index = update_tick,
-                .input = frame_input,
+                .input = update_input,
             });
+
+            update_input.escape.changed = 0;
+            update_input.space.changed = 0;
+            update_input.mouse_left.changed = 0;
+
             update_accum -= update_step_ns;
         }
 
@@ -824,9 +624,13 @@ pub fn main() !void {
             update_accum %= update_step_ns;
         }
 
-        const is_empty_backbuffer = (backbuffer.memory.len == 0);
-        if ((render_accum >= render_step_ns) and !is_empty_backbuffer) {
+        if (render_accum >= render_step_ns and backbuffer.memory.len != 0) {
             render_tick += 1;
+
+            var render_input = frame_input;
+            render_input.escape.changed = 0;
+            render_input.space.changed = 0;
+            render_input.mouse_left.changed = 0;
 
             var frame = abi.Frame{
                 .target = .{
@@ -840,17 +644,18 @@ pub fn main() !void {
                 },
             };
 
-            loader.current.api.render(module_state.ptr(), .{
+            loader.current.api.render(storage.ptr(), .{
                 .dt_ns = render_step_ns,
                 .tick_index = render_tick,
-                .input = frame_input,
+                .input = render_input,
             }, &frame);
 
             executeRenderCommands(&backbuffer, &frame);
             try presentBackbuffer(window, &backbuffer);
-
             render_accum %= render_step_ns;
         }
+
+        clearInputTransitions();
 
         const until_update = update_step_ns - update_accum;
         const until_render = render_step_ns - render_accum;
