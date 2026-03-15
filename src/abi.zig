@@ -20,6 +20,14 @@ pub const Input = extern struct {
     space: Button = .{},
 };
 
+pub const SoftwareBuffer = extern struct {
+    memory: [*]u8,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    bytes_per_pixel: u32,
+};
+
 pub const State = extern struct {
     initialized: u8 = 0,
     reload_count: u32 = 0,
@@ -39,13 +47,14 @@ pub const TickContext = extern struct {
 pub const InitFn = *const fn (state: *State) callconv(.c) void;
 pub const ReloadFn = *const fn (state: *State) callconv(.c) void;
 pub const TickFn = *const fn (state: *State, ctx: TickContext) callconv(.c) void;
+pub const RenderFn = *const fn (state: *State, ctx: TickContext, buffer: *const SoftwareBuffer) callconv(.c) void;
 
 pub const Api = extern struct {
     abi_version: u32,
     init: InitFn,
     on_reload: ReloadFn,
     update: TickFn,
-    render: TickFn,
+    render: RenderFn,
 };
 
 pub const GetApiFn = *const fn () callconv(.c) *const Api;

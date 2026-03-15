@@ -3,6 +3,7 @@ const abi = @import("abi.zig");
 
 const BOOL = i32;
 const UINT = u32;
+const WORD = u16;
 const DWORD = u32;
 const INT = i32;
 const LONG = i32;
@@ -18,6 +19,7 @@ const HMENU = HANDLE;
 const HICON = HANDLE;
 const HCURSOR = HANDLE;
 const HBRUSH = HANDLE;
+const HDC = HANDLE;
 
 const WM_KEYDOWN: UINT = 0x0100;
 const WM_KEYUP: UINT = 0x0101;
@@ -49,6 +51,55 @@ const MSG = extern struct {
     pt: POINT,
     lPrivate: DWORD,
 };
+
+const RGBQUAD = extern struct {
+    rgbBlue: u8,
+    rgbGreen: u8,
+    rgbRed: u8,
+    rgbReserved: u8,
+};
+
+const BITMAPINFOHEADER = extern struct {
+    biSize: DWORD,
+    biWidth: LONG,
+    biHeight: LONG,
+    biPlanes: WORD,
+    biBitCount: WORD,
+    biCompression: DWORD,
+    biSizeImage: DWORD,
+    biXPelsPerMeter: LONG,
+    biYPelsPerMeter: LONG,
+    biClrUsed: DWORD,
+    biClrImportant: DWORD,
+};
+
+const BITMAPINFO = extern struct {
+    bmiHeader: BITMAPINFOHEADER,
+    bmiColors: [1]RGBQUAD,
+};
+
+extern "user32" fn GetDC(hwnd: HWND) callconv(.winapi) HDC;
+extern "user32" fn ReleaseDC(hwnd: HWND, hdc: HDC) callconv(.winapi) INT;
+
+extern "gdi32" fn StretchDIBits(
+    hdc: HDC,
+    x_dest: INT,
+    y_dest: INT,
+    dest_width: INT,
+    dest_height: INT,
+    x_src: INT,
+    y_src: INT,
+    src_width: INT,
+    src_height: INT,
+    bits: ?*const anyopaque,
+    bits_info: *const BITMAPINFO,
+    usage: UINT,
+    rop: DWORD,
+) callconv(.winapi) INT;
+
+const BI_RGB: DWORD = 0;
+const DIB_RGB_COLORS: UINT = 0;
+const SRCCOPY: DWORD = 0x00CC0020;
 
 const WNDPROC = *const fn (
     hwnd: HWND,
@@ -127,6 +178,108 @@ const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 
 extern "kernel32" fn QueryPerformanceCounter(performance_count: *i64) callconv(.winapi) i32;
 extern "kernel32" fn QueryPerformanceFrequency(frequency: *i64) callconv(.winapi) i32;
+
+const Win32OffscreenBuffer = struct {
+    info: BITMAPINFO = .{
+        .bmiHeader = .{
+            .biSize = @intCast(@sizeOf(BITMAPINFOHEADER)),
+            .biWidth = 0,
+            .biHeight = 0,
+            .biPlanes = 1,
+            .biBitCount = 32,
+            .biCompression = BI_RGB,
+            .biSizeImage = 0,
+            .biXPelsPerMeter = 0,
+            .biYPelsPerMeter = 0,
+            .biClrUsed = 0,
+            .biClrImportant = 0,
+        },
+        .bmiColors = [_]RGBQUAD{.{
+            .rgbBlue = 0,
+            .rgbGreen = 0,
+            .rgbRed = 0,
+            .rgbReserved = 0,
+        }},
+    },
+
+    memory: []align(@alignOf(u32)) u8 = &.{},
+    width: u32 = 0,
+    height: u32 = 0,
+    pitch: u32 = 0,
+    bytes_per_pixel: u32 = 4,
+
+    fn deinit(self: *Win32OffscreenBuffer, allocator: std.mem.Allocator) void {
+        if (self.memory.len != 0) {
+            allocator.free(self.memory);
+            self.memory = &.{};
+        }
+    }
+
+    fn resize(self: *Win32OffscreenBuffer, allocator: std.mem.Allocator, width: u32, height: u32) !void {
+        if (self.width == width and self.height == height) return;
+
+        if (self.memory.len != 0) {
+            allocator.free(self.memory);
+            self.memory = &.{};
+        }
+
+        self.width = width;
+        self.height = height;
+        self.pitch = width * self.bytes_per_pixel;
+
+        if (width == 0 or height == 0) {
+            self.info.bmiHeader.biWidth = 0;
+            self.info.bmiHeader.biHeight = 0;
+            self.info.bmiHeader.biSizeImage = 0;
+            return;
+        }
+
+        const size =
+            @as(usize, width) *
+            @as(usize, height) *
+            @as(usize, self.bytes_per_pixel);
+
+        self.memory = try allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(u32)), size);
+        @memset(self.memory, 0);
+
+        self.info.bmiHeader.biWidth = @intCast(width);
+        self.info.bmiHeader.biHeight = @as(LONG, @intCast(height));
+        self.info.bmiHeader.biSizeImage = @intCast(size);
+    }
+
+    fn toAbi(self: *Win32OffscreenBuffer) abi.SoftwareBuffer {
+        return .{
+            .memory = self.memory.ptr,
+            .width = self.width,
+            .height = self.height,
+            .pitch = self.pitch,
+            .bytes_per_pixel = self.bytes_per_pixel,
+        };
+    }
+};
+
+fn presentBackbuffer(window: HWND, buffer: *const Win32OffscreenBuffer) !void {
+    if (buffer.memory.len == 0) return;
+
+    const dc = GetDC(window) orelse return error.GetDCFailed;
+    defer _ = ReleaseDC(window, dc);
+
+    _ = StretchDIBits(
+        dc,
+        0,
+        0,
+        @intCast(buffer.width),
+        @intCast(buffer.height),
+        0,
+        0,
+        @intCast(buffer.width),
+        @intCast(buffer.height),
+        @ptrCast(buffer.memory.ptr),
+        &buffer.info,
+        DIB_RGB_COLORS,
+        SRCCOPY,
+    );
+}
 
 const module_name = "work_module.dll";
 const loaded_a_name = "work_module_loaded_a.dll";
@@ -427,6 +580,9 @@ pub fn main() !void {
     var loader = try ModuleLoader.init(allocator);
     defer loader.deinit(allocator);
 
+    var backbuffer = Win32OffscreenBuffer{};
+    defer backbuffer.deinit(allocator);
+
     var state: abi.State = .{};
     loader.current.api.init(&state);
 
@@ -457,6 +613,7 @@ pub fn main() !void {
         try loader.maybeReload(&state);
 
         const frame_input = try snapshotInput(window);
+        try backbuffer.resize(allocator, frame_input.client_width, frame_input.client_height);
 
         update_accum += frame_ns;
         render_accum += frame_ns;
@@ -488,11 +645,15 @@ pub fn main() !void {
             render_input.space.changed = 0;
 
             render_tick += 1;
+
+            const render_buffer = backbuffer.toAbi();
             loader.current.api.render(&state, .{
                 .dt_ns = render_step_ns,
                 .tick_index = render_tick,
                 .input = render_input,
-            });
+            }, &render_buffer);
+
+            try presentBackbuffer(window, &backbuffer);
 
             render_accum %= render_step_ns;
         }
