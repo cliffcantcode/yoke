@@ -49,6 +49,7 @@ pub fn panel(frame: *abi.Frame, r: Rect, fill: u32, border: u32) void {
     strokeRect(frame, r, 2, border);
 }
 
+// TODO: This is cool but I don't like it. Replace with a simple spin.
 pub fn orbitSquares(
     frame: *abi.Frame,
     center_x: f32,
