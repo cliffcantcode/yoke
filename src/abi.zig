@@ -42,11 +42,13 @@ pub const TickContext = extern struct {
 pub const RenderCommandKind = enum(u32) {
     clear = 1,
     fill_rect = 2,
+    stroke_rect = 3,
 };
 
 pub const RenderCommand = extern struct {
     kind: u32 = 0,
     color: u32 = 0,
+    thickness: f32 = 1.0,
 
     x0: f32 = 0,
     y0: f32 = 0,
@@ -115,6 +117,26 @@ pub fn fillRect(
     _ = pushCommand(frame, .{
         .kind = @intFromEnum(RenderCommandKind.fill_rect),
         .color = color,
+        .x0 = x0,
+        .y0 = y0,
+        .x1 = x1,
+        .y1 = y1,
+    });
+}
+
+pub fn strokeRect(
+    frame: *Frame,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    thickness: f32,
+    color: u32,
+) void {
+    _ = pushCommand(frame, .{
+        .kind = @intFromEnum(RenderCommandKind.stroke_rect),
+        .color = color,
+        .thickness = thickness,
         .x0 = x0,
         .y0 = y0,
         .x1 = x1,

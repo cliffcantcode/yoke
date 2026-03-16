@@ -2,6 +2,8 @@ const std = @import("std");
 
 const abi = @import("abi.zig");
 const theme = @import("themes.zig").default;
+const draw = @import("draw.zig");
+const widgets = @import("widgets.zig");
 
 const WorkState = struct {
     reload_count: u32 = 0,
@@ -30,8 +32,13 @@ fn getState(module_state: *anyopaque) *WorkState {
     return @ptrCast(@alignCast(module_state));
 }
 
-fn pointInRect(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32) bool {
-    return px >= x and px < x + w and py >= y and py < y + h;
+fn currentRect(state: *const WorkState) draw.Rect {
+    return .{
+        .x = state.rect_x,
+        .y = state.rect_y,
+        .w = state.rect_w,
+        .h = state.rect_h,
+    };
 }
 
 fn init(module_state: *anyopaque) callconv(.c) void {
@@ -54,13 +61,12 @@ fn update(module_state: *anyopaque, ctx: abi.TickContext) callconv(.c) void {
         state.dragging = 0;
     }
 
-    if (abi.buttonPressed(ctx.input.mouse_left) and pointInRect(
+    const r = currentRect(state);
+
+    if (abi.buttonPressed(ctx.input.mouse_left) and draw.contains(
+        r,
         ctx.input.mouse_x,
         ctx.input.mouse_y,
-        state.rect_x,
-        state.rect_y,
-        state.rect_w,
-        state.rect_h,
     )) {
         state.dragging = 1;
         state.drag_start_mouse_x = ctx.input.mouse_x;
@@ -95,42 +101,22 @@ fn render(module_state: *anyopaque, ctx: abi.TickContext, frame: *abi.Frame) cal
     const state = getState(module_state);
     state.render_count += 1;
 
-    abi.clear(frame, theme.canvas_bg);
-    abi.fillRect(frame, 0, 0, 24, 24, theme.origin_marker);
+    const r = currentRect(state);
+    const hovering = draw.contains(r, ctx.input.mouse_x, ctx.input.mouse_y);
 
-    const hovering = pointInRect(
-        ctx.input.mouse_x,
-        ctx.input.mouse_y,
-        state.rect_x,
-        state.rect_y,
-        state.rect_w,
-        state.rect_h,
-    );
+    draw.begin(frame, theme);
+    draw.originMarker(frame, theme);
 
-    const rect_color = if (state.dragging != 0)
-        theme.accent_active
-    else if (hovering)
-        theme.accent_hover
-    else
-        theme.accent;
-
-    abi.fillRect(
+    widgets.panelWithHeader(
         frame,
-        state.rect_x,
-        state.rect_y,
-        state.rect_x + state.rect_w,
-        state.rect_y + state.rect_h,
-        rect_color,
+        r,
+        theme,
+        hovering,
+        state.dragging != 0,
+        10,
     );
 
-    abi.fillRect(
-        frame,
-        ctx.input.mouse_x - 3,
-        ctx.input.mouse_y - 3,
-        ctx.input.mouse_x + 4,
-        ctx.input.mouse_y + 4,
-        theme.cursor,
-    );
+    draw.cursor(frame, ctx.input.mouse_x, ctx.input.mouse_y, theme.cursor);
 
     if (state.render_count % 60 == 0) {
         std.debug.print(

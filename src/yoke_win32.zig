@@ -329,6 +329,23 @@ fn backbufferFillRect(buffer: *Win32Backbuffer, x0_in: i32, y0_in: i32, x1_in: i
     }
 }
 
+fn backbufferStrokeRect(
+    buffer: *Win32Backbuffer,
+    x0_in: i32,
+    y0_in: i32,
+    x1_in: i32,
+    y1_in: i32,
+    thickness_in: i32,
+    color: u32,
+) void {
+    const t = @max(thickness_in, 1);
+
+    backbufferFillRect(buffer, x0_in, y0_in, x1_in, y0_in + t, color); // bottom
+    backbufferFillRect(buffer, x0_in, y1_in - t, x1_in, y1_in, color); // top
+    backbufferFillRect(buffer, x0_in, y0_in + t, x0_in + t, y1_in - t, color); // left
+    backbufferFillRect(buffer, x1_in - t, y0_in + t, x1_in, y1_in - t, color); // right
+}
+
 fn executeRenderCommands(buffer: *Win32Backbuffer, frame: *const abi.Frame) void {
     var i: u32 = 0;
     while (i < frame.command_buffer.count) : (i += 1) {
@@ -344,6 +361,18 @@ fn executeRenderCommands(buffer: *Win32Backbuffer, frame: *const abi.Frame) void
                 @intFromFloat(cmd.y1),
                 cmd.color,
             ),
+            .stroke_rect => {
+                const thickness = @max(1, @as(i32, @intFromFloat(cmd.thickness)));
+                backbufferStrokeRect(
+                    buffer,
+                    @intFromFloat(cmd.x0),
+                    @intFromFloat(cmd.y0),
+                    @intFromFloat(cmd.x1),
+                    @intFromFloat(cmd.y1),
+                    thickness,
+                    cmd.color,
+                );
+            },
         }
     }
 }
