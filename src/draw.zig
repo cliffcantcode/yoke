@@ -1,3 +1,4 @@
+const std = @import("std");
 const abi = @import("abi.zig");
 const themes = @import("themes.zig");
 
@@ -28,6 +29,7 @@ pub fn contains(r: Rect, px: f32, py: f32) bool {
 
 pub fn begin(frame: *abi.Frame, theme: Theme) void {
     abi.clear(frame, theme.canvas_bg);
+    abi.setCursor(frame, .arrow);
 }
 
 pub fn originMarker(frame: *abi.Frame, theme: Theme) void {
@@ -47,7 +49,26 @@ pub fn panel(frame: *abi.Frame, r: Rect, fill: u32, border: u32) void {
     strokeRect(frame, r, 2, border);
 }
 
-pub fn cursor(frame: *abi.Frame, x: f32, y: f32, color: u32) void {
-    abi.fillRect(frame, x - 3, y - 3, x + 4, y + 4, color);
+pub fn orbitSquares(
+    frame: *abi.Frame,
+    center_x: f32,
+    center_y: f32,
+    tick_index: u64,
+    radius: f32,
+    square_size: f32,
+    color: u32,
+) void {
+    const t = @as(f32, @floatFromInt(tick_index)) * 0.18;
+    const tau_over_4: f32 = std.math.tau / 4.0;
+
+    var i: u32 = 0;
+    while (i < 4) : (i += 1) {
+        const angle = t + @as(f32, @floatFromInt(i)) * tau_over_4;
+        const x = center_x + std.math.cos(angle) * radius;
+        const y = center_y + std.math.sin(angle) * radius;
+        const half = square_size * 0.5;
+
+        abi.fillRect(frame, x - half, y - half, x + half, y + half, color);
+    }
 }
 

@@ -55,6 +55,19 @@ const WS_OVERLAPPEDWINDOW: DWORD =
 const SW_SHOW: INT = 5;
 const CW_USEDEFAULT: INT = @as(INT, @bitCast(@as(u32, 0x80000000)));
 
+const WM_SETCURSOR: UINT = 0x0020;
+const HTCLIENT: u16 = 1;
+
+const IDC_ARROW_ID: u16 = 32512;
+const IDC_SIZEALL_ID: u16 = 32646;
+const IDC_HAND_ID: u16 = 32649;
+
+extern "user32" fn LoadCursorA(instance: HINSTANCE, cursor_name: ?[*:0]const u8) callconv(.winapi) HCURSOR;
+extern "user32" fn SetCursor(cursor: HCURSOR) callconv(.winapi) HCURSOR;
+
+const permanent_storage_size: u64 = 64 * 1024 * 1024;
+const transient_storage_size: u64 = 256 * 1024 * 1024;
+
 const update_hz: u32 = 60;
 const render_hz: u32 = 60;
 const max_frame_ns: u64 = 250 * std.time.ns_per_ms;
@@ -229,6 +242,49 @@ const HostInputState = struct {
 };
 
 var g_input_state: HostInputState = .{};
+var g_cursors: CursorSet = undefined;
+var g_current_cursor_kind: abi.CursorKind = .arrow;
+
+const CursorSet = struct {
+    arrow: HCURSOR,
+    hand: HCURSOR,
+    size_all: HCURSOR,
+};
+
+fn makeIntResourceA(id: u16) [*:0]const u8 {
+    return @ptrFromInt(id);
+}
+
+fn loadSystemCursor(id: u16) !HCURSOR {
+    return LoadCursorA(null, makeIntResourceA(id)) orelse error.LoadCursorFailed;
+}
+
+fn initCursors() !void {
+    g_cursors = .{
+        .arrow = try loadSystemCursor(IDC_ARROW_ID),
+        .hand = try loadSystemCursor(IDC_HAND_ID),
+        .size_all = try loadSystemCursor(IDC_SIZEALL_ID),
+    };
+}
+
+fn applyCursor(kind: abi.CursorKind) void {
+    const cursor = switch (kind) {
+        .arrow => g_cursors.arrow,
+        .hand => g_cursors.hand,
+        .size_all => g_cursors.size_all,
+    };
+    _ = SetCursor(cursor);
+}
+
+fn setDesiredCursor(kind: abi.CursorKind) void {
+    g_current_cursor_kind = kind;
+    applyCursor(kind);
+}
+
+fn lowU16(l_param: LPARAM) u16 {
+    const raw: usize = @bitCast(l_param);
+    return @truncate(raw);
+}
 
 const Win32Backbuffer = struct {
     info: BITMAPINFO = .{
@@ -502,6 +558,13 @@ fn windowProc(hwnd: HWND, msg: UINT, w_param: WPARAM, l_param: LPARAM) callconv(
             _ = ReleaseCapture();
             return 0;
         },
+        WM_SETCURSOR => {
+            if (lowU16(l_param) == HTCLIENT or g_input_state.mouse_left.is_down) {
+                applyCursor(g_current_cursor_kind);
+                return 1;
+            }
+            return DefWindowProcA(hwnd, msg, w_param, l_param);
+        },
         else => return DefWindowProcA(hwnd, msg, w_param, l_param),
     }
 }
@@ -519,7 +582,7 @@ fn createMainWindow() !HWND {
         .cbWndExtra = 0,
         .hInstance = instance,
         .hIcon = null,
-        .hCursor = null,
+        .hCursor = g_cursors.arrow,
         .hbrBackground = null,
         .lpszMenuName = null,
         .lpszClassName = class_name,
@@ -562,24 +625,16 @@ fn pumpMessages() bool {
     return true;
 }
 
-fn syncModuleState(
-    allocator: std.mem.Allocator,
-    loader: *hot_reload.Loader,
-    storage: *module_state.Storage,
-    initial_load: bool,
-) !void {
-    const state_was_reset = try storage.ensureSize(allocator, loader.current.api.module_state_size);
+fn validateModuleMemory(loader: *const hot_reload.Loader, storage: *module_state.Storage) !void {
+    const memory = storage.memory();
 
-    if (initial_load or state_was_reset) {
-        loader.current.api.init(storage.ptr());
-        if (!initial_load and state_was_reset) {
-            std.debug.print("reloaded {s} (module state reset)\n", .{loader.config.module_name});
-        }
-        return;
+    if (loader.current.api.required_permanent_storage_size > memory.permanent_storage_size) {
+        return error.PermanentStorageTooSmall;
     }
 
-    loader.current.api.on_reload(storage.ptr());
-    std.debug.print("reloaded {s}\n", .{loader.config.module_name});
+    if (loader.current.api.required_transient_storage_size > memory.transient_storage_size) {
+        return error.TransientStorageTooSmall;
+    }
 }
 
 pub fn main() !void {
@@ -589,12 +644,19 @@ pub fn main() !void {
     var loader = try hot_reload.Loader.init(allocator, .{});
     defer loader.deinit(allocator);
 
-    var storage = module_state.Storage{};
-    defer storage.deinit(allocator);
-    try syncModuleState(allocator, &loader, &storage, true);
+    var storage = try module_state.Storage.init(.{
+        .permanent_storage_size = permanent_storage_size,
+        .transient_storage_size = transient_storage_size,
+    });
+    defer storage.deinit();
+
+    try validateModuleMemory(&loader, &storage);
+    loader.current.api.init(storage.memory());
 
     var backbuffer = Win32Backbuffer{};
     defer backbuffer.deinit(allocator);
+
+    try initCursors();
 
     const window = try createMainWindow();
 
@@ -622,7 +684,9 @@ pub fn main() !void {
         frame_ns = @min(frame_ns, max_frame_ns);
 
         if (try loader.maybeReload()) {
-            try syncModuleState(allocator, &loader, &storage, false);
+            try validateModuleMemory(&loader, &storage);
+            loader.current.api.on_reload(storage.memory());
+            std.debug.print("Reloaded {s}\n", .{loader.config.module_name});
         }
 
         const frame_input = try snapshotInput(window);
@@ -636,7 +700,7 @@ pub fn main() !void {
 
         while (update_accum >= update_step_ns and caught_up < max_catchup_updates) : (caught_up += 1) {
             update_tick += 1;
-            loader.current.api.update(storage.ptr(), .{
+            loader.current.api.update(storage.memory(), .{
                 .dt_ns = update_step_ns,
                 .tick_index = update_tick,
                 .input = update_input,
@@ -671,13 +735,16 @@ pub fn main() !void {
                     .count = 0,
                     .capacity = render_commands.len,
                 },
+                .cursor_kind = @intFromEnum(abi.CursorKind.arrow),
             };
 
-            loader.current.api.render(storage.ptr(), .{
+            loader.current.api.render(storage.memory(), .{
                 .dt_ns = render_step_ns,
                 .tick_index = render_tick,
                 .input = render_input,
             }, &frame);
+
+            setDesiredCursor(@enumFromInt(frame.cursor_kind));
 
             executeRenderCommands(&backbuffer, &frame);
             try presentBackbuffer(window, &backbuffer);
