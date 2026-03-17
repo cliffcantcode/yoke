@@ -42,9 +42,21 @@ pub fn measure(text: []const u8, options: Options) Size {
     max_width = @max(max_width, line_width);
 
     return .{
-        .width = max_width,
+        .width = max_width / 2.0,
         .height = @as(f32, @floatFromInt(lines)) * glyph_h + @as(f32, @floatFromInt(lines - 1)) * options.line_spacing * options.scale,
     };
+}
+
+pub fn glyphWidth(options: Options) f32 {
+    return glyph_cols * options.scale;
+}
+
+pub fn glyphHeight(options: Options) f32 {
+    return glyph_rows * options.scale;
+}
+
+pub fn lineAdvance(options: Options) f32 {
+    return glyphHeight(options) + options.line_spacing * options.scale;
 }
 
 pub fn drawText(frame: *abi.Frame, x: f32, y: f32, text: []const u8, options: Options, color: u32) void {

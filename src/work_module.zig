@@ -5,6 +5,7 @@ const theme = @import("themes.zig").default;
 const draw = @import("draw.zig");
 const text = @import("text.zig");
 const widgets = @import("widgets.zig");
+const layout = @import("layout.zig");
 
 const WorkState = struct {
     reload_count: u32 = 0,
@@ -48,80 +49,38 @@ fn render(memory: *abi.PlatformMemory, ctx: abi.TickContext, frame: *abi.Frame) 
     const state = getState(memory);
     state.render_count += 1;
 
+    defer draw.cursorSquare(frame, ctx.input.mouse_x, ctx.input.mouse_y, theme.cursor);
+
     draw.begin(frame, theme);
     draw.originMarker(frame, theme);
 
-    defer draw.cursorSquare(frame, ctx.input.mouse_x, ctx.input.mouse_y, theme.cursor);
-
-    draw.line(
-        frame,
-        0,
-        0,
-        @as(f32, @floatFromInt(ctx.input.client_width - 1)),
-        @as(f32, @floatFromInt(ctx.input.client_height - 1)),
-        3,
-        theme.panel_border,
-    );
-
-    draw.line(
-        frame,
-        0,
-        @as(f32, @floatFromInt(ctx.input.client_height - 1)),
-        @as(f32, @floatFromInt(ctx.input.client_width - 1)),
-        0,
-        3,
-        theme.accent,
-    );
-
     state.panel.draw_panel(frame, theme, ctx, 10.0);
 
-    text.drawTopLeft(
-        frame,
-        state.panel.rect.x + 8,
-        state.panel.rect.top() - 3,
-        "YOKE PANEL",
-        .{ .scale = 2 },
-        theme.text,
-    );
+    const title_opts = text.Options{ .scale = 2.0 };
+    const body_opts = text.Options{ .scale = 2.0 };
+    const small_opts = text.Options{ .scale = 1.0 };
 
-    var line_buf: [64]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buf, "RELOADS {d}", .{state.reload_count}) catch "RELOADS ?";
-    text.drawTopLeft(
-        frame,
-        state.panel.rect.x + 8,
-        state.panel.rect.top() - 24,
-        line,
-        .{ .scale = 2 },
-        theme.text_muted,
-    );
+    var value_buf: [64]u8 = undefined;
+    var ui = layout.Cursor.fromPanel(state.panel.rect, 10.0, 10.0, 6.0);
 
-    const line2 = std.fmt.bufPrint(&line_buf, "UPDATES {d}", .{state.update_count}) catch "UPDATES ?";
-    text.drawTopLeft(
-        frame,
-        state.panel.rect.x + 8,
-        state.panel.rect.top() - 42,
-        line2,
-        .{ .scale = 2 },
-        theme.text_muted,
-    );
+    layout.title(frame, &ui, "YOKE PANEL", theme, title_opts);
+    layout.separator(frame, &ui, theme);
 
-    text.drawTopLeft(
-        frame,
-        state.panel.rect.x + 8,
-        state.panel.rect.y + 28,
-        "DRAG WITH LMB",
-        .{ .scale = 2 },
-        theme.accent,
-    );
+    const reloads = std.fmt.bufPrint(&value_buf, "{d}", .{state.reload_count}) catch "?";
+    layout.labelValue(frame, &ui, "Reloads", reloads, theme, body_opts, body_opts);
 
-    text.drawTopLeft(
-        frame,
-        state.panel.rect.x + 8,
-        state.panel.rect.y + 12,
-        "ESC RESETS",
-        .{ .scale = 2 },
-        theme.text_muted,
-    );
+    const updates = std.fmt.bufPrint(&value_buf, "{d}", .{state.update_count}) catch "?";
+    layout.labelValue(frame, &ui, "Updates", updates, theme, body_opts, body_opts);
+
+    const dragging = if (state.panel.dragging) "YES" else "NO";
+    layout.labelValue(frame, &ui, "Dragging", dragging, theme, body_opts, body_opts);
+
+    layout.separator(frame, &ui, theme);
+    layout.note(frame, &ui, "DRAG WITH LMB", theme.accent, small_opts);
+    layout.note(frame, &ui, "ESC RESETS", theme.text_muted, small_opts);
+
+    const progress = @as(f32, @floatFromInt(@mod(state.update_count, 120))) / 119.0;
+    layout.progressBar(frame, &ui, theme, progress, 10.0);
 
     if (state.render_count % 60 == 0) {
         std.debug.print(
