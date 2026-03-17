@@ -87,21 +87,6 @@ pub const DraggablePanel = struct {
             .w = self.rect.w,
             .h = header_height,
         }, if (self.dragging) theme.accent_active else if (hovering) theme.accent_hover else theme.accent);
-
-        if (self.dragging) {
-            abi.setCursor(frame, .size_all);
-            draw.orbitSquares(
-                frame,
-                ctx.input.mouse_x,
-                ctx.input.mouse_y,
-                ctx.tick_index,
-                12.0,
-                4.0,
-                theme.accent_active,
-            );
-        } else if (hovering) {
-            abi.setCursor(frame, .hand);
-        }
     }
 };
 

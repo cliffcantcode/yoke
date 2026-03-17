@@ -43,6 +43,7 @@ pub const RenderCommandKind = enum(u32) {
     clear = 1,
     fill_rect = 2,
     stroke_rect = 3,
+    line = 4,
 };
 
 pub const RenderCommand = extern struct {
@@ -67,16 +68,9 @@ pub const RenderTarget = extern struct {
     height: u32,
 };
 
-pub const CursorKind = enum(u32) {
-    arrow = 0,
-    hand = 1,
-    size_all = 2,
-};
-
 pub const Frame = extern struct {
     target: RenderTarget,
     command_buffer: CommandBuffer,
-    cursor_kind: u32,
 };
 
 pub const PlatformMemory = extern struct {
@@ -105,10 +99,6 @@ pub const GetApiFn = *const fn () callconv(.c) *const Api;
 
 pub fn RGB(r: u8, g: u8, b: u8) u32 {
     return (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
-}
-
-pub fn setCursor(frame: *Frame, kind: CursorKind) void {
-    frame.cursor_kind = @intFromEnum(kind);
 }
 
 pub fn pushCommand(frame: *Frame, cmd: RenderCommand) bool {
@@ -154,6 +144,26 @@ pub fn strokeRect(
 ) void {
     _ = pushCommand(frame, .{
         .kind = @intFromEnum(RenderCommandKind.stroke_rect),
+        .color = color,
+        .thickness = thickness,
+        .x0 = x0,
+        .y0 = y0,
+        .x1 = x1,
+        .y1 = y1,
+    });
+}
+
+pub fn line(
+    frame: *Frame,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    thickness: f32,
+    color: u32,
+) void {
+    _ = pushCommand(frame, .{
+        .kind = @intFromEnum(RenderCommandKind.line),
         .color = color,
         .thickness = thickness,
         .x0 = x0,

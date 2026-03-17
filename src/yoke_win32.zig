@@ -1,7 +1,6 @@
 const std = @import("std");
 const abi = @import("abi.zig");
-const hot_reload = @import("runtime/hot_reload.zig");
-const module_state = @import("runtime/module_state.zig");
+const hot_reload = @import("hot_reload.zig");
 
 const BOOL = i32;
 const UINT = u32;
@@ -58,12 +57,104 @@ const CW_USEDEFAULT: INT = @as(INT, @bitCast(@as(u32, 0x80000000)));
 const WM_SETCURSOR: UINT = 0x0020;
 const HTCLIENT: u16 = 1;
 
+extern "user32" fn SetCursor(cursor: HCURSOR) callconv(.winapi) HCURSOR;
+
 const IDC_ARROW_ID: u16 = 32512;
 const IDC_SIZEALL_ID: u16 = 32646;
 const IDC_HAND_ID: u16 = 32649;
 
-extern "user32" fn LoadCursorA(instance: HINSTANCE, cursor_name: ?[*:0]const u8) callconv(.winapi) HCURSOR;
-extern "user32" fn SetCursor(cursor: HCURSOR) callconv(.winapi) HCURSOR;
+const MEM_COMMIT: DWORD = 0x00001000;
+const MEM_RESERVE: DWORD = 0x00002000;
+const MEM_RELEASE: DWORD = 0x00008000;
+const PAGE_READWRITE: DWORD = 0x04;
+
+extern "kernel32" fn VirtualAlloc(
+    address: ?*anyopaque,
+    size: usize,
+    allocation_type: DWORD,
+    protect: DWORD,
+) callconv(.winapi) ?*anyopaque;
+
+extern "kernel32" fn VirtualFree(
+    address: ?*anyopaque,
+    size: usize,
+    free_type: DWORD,
+) callconv(.winapi) BOOL;
+
+pub const Config = struct {
+    permanent_storage_size: u64 = 64 * 1024 * 1024,
+    transient_storage_size: u64 = 256 * 1024 * 1024,
+};
+
+pub const ModuleStorage = struct {
+    base_address: ?*anyopaque,
+    total_size: u64,
+    transient_offset: u64,
+    platform_memory: abi.PlatformMemory,
+
+    pub fn init(config: Config) !ModuleStorage {
+        const alignment: u64 = abi.module_state_alignment;
+
+        const permanent_aligned = alignForwardU64(config.permanent_storage_size, alignment);
+        const transient_offset = permanent_aligned;
+
+        const total_size_u64 = blk: {
+            const raw = permanent_aligned + config.transient_storage_size;
+            break :blk if (raw == 0) 1 else raw;
+        };
+
+        const total_size: usize = @intCast(total_size_u64);
+
+        const base = VirtualAlloc(
+            null,
+            total_size,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+        ) orelse return error.VirtualAllocFailed;
+
+        const base_bytes: [*]align(abi.module_state_alignment) u8 = @ptrCast(@alignCast(base));
+
+        const permanent_storage: *anyopaque = @ptrCast(base_bytes);
+
+        const transient_storage: *anyopaque = if (config.transient_storage_size == 0)
+            @ptrCast(base_bytes)
+        else
+            @ptrCast(base_bytes + @as(usize, @intCast(transient_offset)));
+
+        return .{
+            .base_address = base,
+            .total_size = total_size_u64,
+            .transient_offset = transient_offset,
+            .platform_memory = .{
+                .permanent_storage_size = config.permanent_storage_size,
+                .permanent_storage = permanent_storage,
+                .transient_storage_size = config.transient_storage_size,
+                .transient_storage = transient_storage,
+            },
+        };
+    }
+
+    pub fn deinit(self: *ModuleStorage) void {
+        if (self.base_address) |base| {
+            if (VirtualFree(base, 0, MEM_RELEASE) == 0) {
+                const err = GetLastError();
+                std.debug.print("VirtualFree failed, GetLastError={d}\n", .{err});
+                @panic("VirtualFree failed");
+            }
+            self.base_address = null;
+        }
+    }
+
+    pub fn memory(self: *ModuleStorage) *abi.PlatformMemory {
+        return &self.platform_memory;
+    }
+};
+
+fn alignForwardU64(value: u64, alignment: u64) u64 {
+    std.debug.assert(alignment != 0);
+    const mask = alignment - 1;
+    return (value + mask) & ~mask;
+}
 
 const permanent_storage_size: u64 = 64 * 1024 * 1024;
 const transient_storage_size: u64 = 256 * 1024 * 1024;
@@ -72,7 +163,7 @@ const update_hz: u32 = 60;
 const render_hz: u32 = 60;
 const max_frame_ns: u64 = 250 * std.time.ns_per_ms;
 const max_catchup_updates: u32 = 8;
-const max_render_commands = 1024;
+const max_render_commands = 8192;
 
 const POINT = extern struct {
     x: LONG,
@@ -242,43 +333,10 @@ const HostInputState = struct {
 };
 
 var g_input_state: HostInputState = .{};
-var g_cursors: CursorSet = undefined;
 var g_current_cursor_kind: abi.CursorKind = .arrow;
-
-const CursorSet = struct {
-    arrow: HCURSOR,
-    hand: HCURSOR,
-    size_all: HCURSOR,
-};
 
 fn makeIntResourceA(id: u16) [*:0]const u8 {
     return @ptrFromInt(id);
-}
-
-fn loadSystemCursor(id: u16) !HCURSOR {
-    return LoadCursorA(null, makeIntResourceA(id)) orelse error.LoadCursorFailed;
-}
-
-fn initCursors() !void {
-    g_cursors = .{
-        .arrow = try loadSystemCursor(IDC_ARROW_ID),
-        .hand = try loadSystemCursor(IDC_HAND_ID),
-        .size_all = try loadSystemCursor(IDC_SIZEALL_ID),
-    };
-}
-
-fn applyCursor(kind: abi.CursorKind) void {
-    const cursor = switch (kind) {
-        .arrow => g_cursors.arrow,
-        .hand => g_cursors.hand,
-        .size_all => g_cursors.size_all,
-    };
-    _ = SetCursor(cursor);
-}
-
-fn setDesiredCursor(kind: abi.CursorKind) void {
-    g_current_cursor_kind = kind;
-    applyCursor(kind);
 }
 
 fn lowU16(l_param: LPARAM) u16 {
@@ -363,6 +421,54 @@ fn backbufferClear(buffer: *Win32Backbuffer, color: u32) void {
     }
 }
 
+fn backbufferLine(
+    buffer: *Win32Backbuffer,
+    x0_in: i32,
+    y0_in: i32,
+    x1_in: i32,
+    y1_in: i32,
+    thickness_in: i32,
+    color: u32,
+) void {
+    var x0 = x0_in;
+    var y0 = y0_in;
+    const x1 = x1_in;
+    const y1 = y1_in;
+
+    const dx: i32 = if (x1 >= x0) x1 - x0 else x0 - x1;
+    const sx: i32 = if (x0 < x1) 1 else -1;
+    const dy_abs: i32 = if (y1 >= y0) y1 - y0 else y0 - y1;
+    const dy: i32 = -dy_abs;
+    const sy: i32 = if (y0 < y1) 1 else -1;
+    var err: i32 = dx + dy;
+
+    const thickness = @max(thickness_in, 1);
+    const radius = @divFloor(thickness - 1, 2);
+
+    while (true) {
+        backbufferFillRect(
+            buffer,
+            x0 - radius,
+            y0 - radius,
+            x0 + radius + 1,
+            y0 + radius + 1,
+            color,
+        );
+
+        if (x0 == x1 and y0 == y1) break;
+
+        const e2 = err * 2;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
 fn backbufferFillRect(buffer: *Win32Backbuffer, x0_in: i32, y0_in: i32, x1_in: i32, y1_in: i32, color: u32) void {
     const max_x: i32 = @intCast(buffer.width);
     const max_y: i32 = @intCast(buffer.height);
@@ -420,6 +526,18 @@ fn executeRenderCommands(buffer: *Win32Backbuffer, frame: *const abi.Frame) void
             .stroke_rect => {
                 const thickness = @max(1, @as(i32, @intFromFloat(cmd.thickness)));
                 backbufferStrokeRect(
+                    buffer,
+                    @intFromFloat(cmd.x0),
+                    @intFromFloat(cmd.y0),
+                    @intFromFloat(cmd.x1),
+                    @intFromFloat(cmd.y1),
+                    thickness,
+                    cmd.color,
+                );
+            },
+            .line => {
+                const thickness = @max(1, @as(i32, @intFromFloat(cmd.thickness)));
+                backbufferLine(
                     buffer,
                     @intFromFloat(cmd.x0),
                     @intFromFloat(cmd.y0),
@@ -560,7 +678,7 @@ fn windowProc(hwnd: HWND, msg: UINT, w_param: WPARAM, l_param: LPARAM) callconv(
         },
         WM_SETCURSOR => {
             if (lowU16(l_param) == HTCLIENT or g_input_state.mouse_left.is_down) {
-                applyCursor(g_current_cursor_kind);
+                _ = SetCursor(null);
                 return 1;
             }
             return DefWindowProcA(hwnd, msg, w_param, l_param);
@@ -582,7 +700,7 @@ fn createMainWindow() !HWND {
         .cbWndExtra = 0,
         .hInstance = instance,
         .hIcon = null,
-        .hCursor = g_cursors.arrow,
+        .hCursor = null,
         .hbrBackground = null,
         .lpszMenuName = null,
         .lpszClassName = class_name,
@@ -625,7 +743,7 @@ fn pumpMessages() bool {
     return true;
 }
 
-fn validateModuleMemory(loader: *const hot_reload.Loader, storage: *module_state.Storage) !void {
+fn validateModuleMemory(loader: *const hot_reload.Loader, storage: *ModuleStorage) !void {
     const memory = storage.memory();
 
     if (loader.current.api.required_permanent_storage_size > memory.permanent_storage_size) {
@@ -644,7 +762,7 @@ pub fn main() !void {
     var loader = try hot_reload.Loader.init(allocator, .{});
     defer loader.deinit(allocator);
 
-    var storage = try module_state.Storage.init(.{
+    var storage = try ModuleStorage.init(.{
         .permanent_storage_size = permanent_storage_size,
         .transient_storage_size = transient_storage_size,
     });
@@ -655,8 +773,6 @@ pub fn main() !void {
 
     var backbuffer = Win32Backbuffer{};
     defer backbuffer.deinit(allocator);
-
-    try initCursors();
 
     const window = try createMainWindow();
 
@@ -735,7 +851,6 @@ pub fn main() !void {
                     .count = 0,
                     .capacity = render_commands.len,
                 },
-                .cursor_kind = @intFromEnum(abi.CursorKind.arrow),
             };
 
             loader.current.api.render(storage.memory(), .{
@@ -743,8 +858,6 @@ pub fn main() !void {
                 .tick_index = render_tick,
                 .input = render_input,
             }, &frame);
-
-            setDesiredCursor(@enumFromInt(frame.cursor_kind));
 
             executeRenderCommands(&backbuffer, &frame);
             try presentBackbuffer(window, &backbuffer);

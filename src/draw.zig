@@ -29,7 +29,6 @@ pub fn contains(r: Rect, px: f32, py: f32) bool {
 
 pub fn begin(frame: *abi.Frame, theme: Theme) void {
     abi.clear(frame, theme.canvas_bg);
-    abi.setCursor(frame, .arrow);
 }
 
 pub fn originMarker(frame: *abi.Frame, theme: Theme) void {
@@ -44,32 +43,24 @@ pub fn strokeRect(frame: *abi.Frame, r: Rect, thickness: f32, color: u32) void {
     abi.strokeRect(frame, r.x, r.y, r.right(), r.top(), thickness, color);
 }
 
+pub fn line(
+    frame: *abi.Frame,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    thickness: f32,
+    color: u32,
+) void {
+    abi.line(frame, x0, y0, x1, y1, thickness, color);
+}
+
 pub fn panel(frame: *abi.Frame, r: Rect, fill: u32, border: u32) void {
     fillRect(frame, r, fill);
     strokeRect(frame, r, 2, border);
 }
 
-// TODO: This is cool but I don't like it. Replace with a simple spin.
-pub fn orbitSquares(
-    frame: *abi.Frame,
-    center_x: f32,
-    center_y: f32,
-    tick_index: u64,
-    radius: f32,
-    square_size: f32,
-    color: u32,
-) void {
-    const t = @as(f32, @floatFromInt(tick_index)) * 0.18;
-    const tau_over_4: f32 = std.math.tau / 4.0;
-
-    var i: u32 = 0;
-    while (i < 4) : (i += 1) {
-        const angle = t + @as(f32, @floatFromInt(i)) * tau_over_4;
-        const x = center_x + std.math.cos(angle) * radius;
-        const y = center_y + std.math.sin(angle) * radius;
-        const half = square_size * 0.5;
-
-        abi.fillRect(frame, x - half, y - half, x + half, y + half, color);
-    }
+pub fn cursorSquare(frame: *abi.Frame, x: f32, y: f32, color: u32) void {
+    fillRect(frame, rect(x - 3, y - 3, 7, 7), color);
 }
 

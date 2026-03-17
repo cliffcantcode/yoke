@@ -1,5 +1,5 @@
 const std = @import("std");
-const abi = @import("../abi.zig");
+const abi = @import("abi.zig");
 
 pub const Config = struct {
     module_name: []const u8 = "work_module.dll",
