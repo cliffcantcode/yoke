@@ -76,8 +76,8 @@ fn render(memory: *abi.PlatformMemory, ctx: abi.TickContext, frame: *abi.Frame) 
     layout.labelValue(frame, &ui, "Dragging", dragging, theme, body_opts, body_opts);
 
     layout.separator(frame, &ui, theme);
-    layout.note(frame, &ui, "DRAG WITH LMB", theme.accent, small_opts);
-    layout.note(frame, &ui, "ESC RESETS", theme.text_muted, small_opts);
+    layout.note(frame, &ui, "Drag with the mouse.", theme.accent, small_opts);
+    layout.note(frame, &ui, "ESC resets", theme.text_muted, small_opts);
 
     const progress = @as(f32, @floatFromInt(@mod(state.update_count, 120))) / 119.0;
     layout.progressBar(frame, &ui, theme, progress, 10.0);
