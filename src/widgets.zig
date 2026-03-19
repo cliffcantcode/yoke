@@ -1,7 +1,10 @@
 const std = @import("std");
+
 const abi = @import("abi.zig");
 const themes = @import("themes.zig");
 const draw = @import("draw.zig");
+
+const assert = @import("assert.zig");
 
 pub const DraggablePanel = struct {
     rect: draw.Rect,
@@ -12,10 +15,17 @@ pub const DraggablePanel = struct {
     drag_start_rect_y: f32 = 0,
 
     pub fn init(x: f32, y: f32, w: f32, h: f32) DraggablePanel {
-        return .{ .rect = .{ .x = x, .y = y, .w = w, .h = h } };
+        const panel = DraggablePanel{ .rect = .{ .x = x, .y = y, .w = w, .h = h } };
+        panel.asserts();
+
+        return panel;
     }
 
     pub fn resetPosition(self: *DraggablePanel, x: f32, y: f32) void {
+        self.asserts();
+        assert.is_finite(x, "DraggablePanel.resetPosition.x", .{});
+        assert.is_finite(y, "DraggablePanel.resetPosition.y", .{});
+
         self.rect.x = x;
         self.rect.y = y;
         self.dragging = false;
@@ -26,6 +36,8 @@ pub const DraggablePanel = struct {
     }
 
     pub fn update(self: *DraggablePanel, input: abi.Input) void {
+        self.asserts();
+
         if (abi.buttonPressed(input.mouse_left) and self.hovered(input)) {
             self.dragging = true;
             self.drag_start_mouse_x = input.mouse_x;
@@ -54,6 +66,8 @@ pub const DraggablePanel = struct {
             self.rect.x = next_x;
             self.rect.y = next_y;
         }
+
+        self.asserts();
     }
 
     pub fn draw_panel(
@@ -63,6 +77,11 @@ pub const DraggablePanel = struct {
         ctx: abi.TickContext,
         header_height: f32,
     ) void {
+        self.asserts();
+        assert.is_finite(header_height, "DraggablePanel.header_height", .{});
+        assert.hard(header_height >= 0, "header_height must be >= 0, got {d}", .{header_height});
+        assert.hard(header_height <= self.rect.h, "header_height {d} exceeds panel height {d}", .{ header_height, self.rect.h });
+
         const hovering = self.hovered(ctx.input);
 
         const fill = if (self.dragging)
@@ -87,6 +106,15 @@ pub const DraggablePanel = struct {
             .w = self.rect.w,
             .h = header_height,
         }, if (self.dragging) theme.accent_active else if (hovering) theme.accent_hover else theme.accent);
+    }
+
+    fn asserts(self: *const DraggablePanel) void {
+        assert.is_finite(self.rect.x, "DraggablePanel.rect.x", .{});
+        assert.is_finite(self.rect.y, "DraggablePanel.rect.y", .{});
+        assert.is_finite(self.rect.w, "DraggablePanel.rect.w", .{});
+        assert.is_finite(self.rect.h, "DraggablePanel.rect.h", .{});
+        assert.hard(self.rect.w >= 0, "DraggablePanel width must be >= 0, got {d}", .{self.rect.w});
+        assert.hard(self.rect.h >= 0, "DraggablePanel height must be >= 0, got {d}", .{self.rect.h});
     }
 };
 

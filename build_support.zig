@@ -83,3 +83,119 @@ pub fn addRunInstalledArtifact(
     }
 }
 
+pub const TracyOptions = struct {
+    enable: bool,
+    callstack_depth: i32,
+    on_demand: bool,
+    only_localhost: bool,
+    delayed_init: bool,
+    manual_lifetime: bool,
+};
+
+pub fn makeTracyOptions(b: *std.Build) TracyOptions {
+    return .{
+        .enable = b.option(bool, "tracy", "Enable Tracy profiling") orelse false,
+
+        .callstack_depth = 8,
+        .on_demand = true,
+        .only_localhost = true,
+        .delayed_init = false,
+        .manual_lifetime = false,
+    };
+}
+
+pub fn validateTracyOptions(tracy: TracyOptions) void {
+    if (tracy.callstack_depth < 0) {
+        @panic("tracy.callstack_depth must be >= 0");
+    }
+
+    if (tracy.manual_lifetime and !tracy.delayed_init) {
+        @panic("tracy.manual_lifetime requires tracy.delayed_init");
+    }
+}
+
+pub fn addTracyBuildOptionsModule(b: *std.Build, tracy: TracyOptions) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.addOption(bool, "tracy_enable", tracy.enable);
+    options.addOption(i32, "tracy_callstack_depth", tracy.callstack_depth);
+    options.addOption(bool, "tracy_manual_lifetime", tracy.manual_lifetime);
+    return options;
+}
+
+pub fn attachTracyBuildOptions(compile: *std.Build.Step.Compile, options: *std.Build.Step.Options) void {
+    compile.root_module.addOptions("build_options", options);
+}
+
+fn addTracyDefine(compile: *std.Build.Step.Compile, name: []const u8, value: ?[]const u8) void {
+    compile.root_module.addCMacro(name, value orelse "1");
+}
+
+pub fn addTracyRuntimeLibrary(
+    b: *std.Build,
+    options: Options,
+    tracy: TracyOptions,
+) ?*std.Build.Step.Compile {
+    if (!tracy.enable) return null;
+
+    const lib = b.addLibrary(.{
+        .name = "yoke_tracy",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tracy_runtime_root.zig"),
+            .target = options.target,
+            .optimize = options.optimize,
+        }),
+    });
+
+    lib.linkLibC();
+    lib.linkLibCpp();
+
+    lib.addIncludePath(b.path("third_party/tracy/public"));
+
+    lib.addCSourceFiles(.{
+        .root = b.path("."),
+        .files = &.{
+            "third_party/tracy/public/TracyClient.cpp",
+            "src/tracy_shim.cpp",
+        },
+        .flags = &.{"-std=c++11"},
+    });
+
+    addTracyDefine(lib, "TRACY_ENABLE", null);
+
+    if (tracy.callstack_depth > 0) {
+        const depth = b.fmt("{d}", .{tracy.callstack_depth});
+        addTracyDefine(lib, "TRACY_CALLSTACK", depth);
+    }
+
+    if (tracy.on_demand) {
+        addTracyDefine(lib, "TRACY_ON_DEMAND", null);
+    }
+
+    if (tracy.only_localhost) {
+        addTracyDefine(lib, "TRACY_ONLY_LOCALHOST", null);
+    }
+
+    if (tracy.delayed_init) {
+        addTracyDefine(lib, "TRACY_DELAYED_INIT", null);
+    }
+
+    if (tracy.manual_lifetime) {
+        addTracyDefine(lib, "TRACY_MANUAL_LIFETIME", null);
+    }
+
+    if (options.target.result.os.tag == .windows) {
+        lib.linkSystemLibrary("ws2_32");
+        lib.linkSystemLibrary("dbghelp");
+        lib.linkSystemLibrary("secur32");
+    }
+
+    return lib;
+}
+
+pub fn linkTracyRuntime(compile: *std.Build.Step.Compile, tracy_runtime: ?*std.Build.Step.Compile) void {
+    if (tracy_runtime) |lib| {
+        compile.linkLibrary(lib);
+    }
+}
+

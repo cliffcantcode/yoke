@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = @import("assert.zig");
 
 pub const abi_version: u32 = 0;
 pub const module_state_alignment: comptime_int = 16;
@@ -102,9 +103,13 @@ pub fn RGB(r: u8, g: u8, b: u8) u32 {
 }
 
 pub fn pushCommand(frame: *Frame, cmd: RenderCommand) bool {
+    assert.hard(frame.command_buffer.count <= frame.command_buffer.capacity, "The command buffer count is too high before push.", .{});
+
     if (frame.command_buffer.count >= frame.command_buffer.capacity) return false;
     frame.command_buffer.commands[frame.command_buffer.count] = cmd;
     frame.command_buffer.count += 1;
+
+    assert.hard(frame.command_buffer.count <= frame.command_buffer.capacity, "The command buffer count is too high after push.", .{});
     return true;
 }
 
@@ -123,6 +128,9 @@ pub fn fillRect(
     y1: f32,
     color: u32,
 ) void {
+    assert.hard(x1 >= x0, "fillRect requires x1 >= x0, got x0={d} x1={d}", .{ x0, x1 });
+    assert.hard(y1 >= y0, "fillRect requires y1 >= y0, got y0={d} y1={d}", .{ y0, y1 });
+
     _ = pushCommand(frame, .{
         .kind = @intFromEnum(RenderCommandKind.fill_rect),
         .color = color,
@@ -142,6 +150,9 @@ pub fn strokeRect(
     thickness: f32,
     color: u32,
 ) void {
+    assert.hard(x1 >= x0, "strokeRect requires x1 >= x0, got x0={d} x1={d}", .{ x0, x1 });
+    assert.hard(y1 >= y0, "strokeRect requires y1 >= y0, got y0={d} y1={d}", .{ y0, y1 });
+
     _ = pushCommand(frame, .{
         .kind = @intFromEnum(RenderCommandKind.stroke_rect),
         .color = color,
