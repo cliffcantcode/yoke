@@ -1,9 +1,64 @@
 const std = @import("std");
 
+const build_options = @import("build_options");
 const abi = @import("abi.zig");
-const hot_reload = @import("hot_reload.zig");
+const hot_reload = if (build_options.hot_reload_enabled) @import("hot_reload.zig") else struct {};
 
 const tracy = @import("tracy.zig");
+
+extern fn yoke_get_api() callconv(.c) *const abi.Api;
+
+const ModuleBinding = if (build_options.hot_reload_enabled)
+    struct {
+        loader: hot_reload.Loader,
+
+        pub fn init(allocator: std.mem.Allocator) !@This() {
+            return .{ .loader = try hot_reload.Loader.init(allocator, .{}) };
+        }
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.loader.deinit(allocator);
+        }
+
+        pub fn api(self: *const @This()) *const abi.Api {
+            return self.loader.current.api;
+        }
+
+        pub fn maybeReload(self: *@This()) !bool {
+            return self.loader.maybeReload();
+        }
+
+        pub fn moduleName(self: *const @This()) []const u8 {
+            return self.loader.config.module_name;
+        }
+    }
+else
+    struct {
+        pub fn init(allocator: std.mem.Allocator) !@This() {
+            _ = allocator;
+            return .{};
+        }
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            _ = self;
+            _ = allocator;
+        }
+
+        pub fn api(self: *const @This()) *const abi.Api {
+            _ = self;
+            return yoke_get_api();
+        }
+
+        pub fn maybeReload(self: *@This()) !bool {
+            _ = self;
+            return false;
+        }
+
+        pub fn moduleName(self: *const @This()) []const u8 {
+            _ = self;
+            return "work_module (static)";
+        }
+    };
 
 const BOOL = i32;
 const UINT = u32;
@@ -746,14 +801,14 @@ fn pumpMessages() bool {
     return true;
 }
 
-fn validateModuleMemory(loader: *const hot_reload.Loader, storage: *ModuleStorage) !void {
+fn validateModuleMemory(api: *const abi.Api, storage: *ModuleStorage) !void {
     const memory = storage.memory();
 
-    if (loader.current.api.required_permanent_storage_size > memory.permanent_storage_size) {
+    if (api.required_permanent_storage_size > memory.permanent_storage_size) {
         return error.PermanentStorageTooSmall;
     }
 
-    if (loader.current.api.required_transient_storage_size > memory.transient_storage_size) {
+    if (api.required_transient_storage_size > memory.transient_storage_size) {
         return error.TransientStorageTooSmall;
     }
 }
@@ -769,8 +824,8 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     var clock = try Clock.init();
-    var loader = try hot_reload.Loader.init(allocator, .{});
-    defer loader.deinit(allocator);
+    var module = try ModuleBinding.init(allocator);
+    defer module.deinit(allocator);
 
     var storage = try ModuleStorage.init(.{
         .permanent_storage_size = permanent_storage_size,
@@ -778,8 +833,8 @@ pub fn main() !void {
     });
     defer storage.deinit();
 
-    try validateModuleMemory(&loader, &storage);
-    loader.current.api.init(storage.memory());
+    try validateModuleMemory(module.api(), &storage);
+    module.api().init(storage.memory());
 
     var backbuffer = Win32Backbuffer{};
     defer backbuffer.deinit(allocator);
@@ -798,7 +853,7 @@ pub fn main() !void {
 
     std.debug.print(
         "yoke windows platform layer | update={d}Hz render={d}Hz | watching {s}\n",
-        .{ update_hz, render_hz, loader.config.module_name },
+        .{ update_hz, render_hz, module.moduleName() },
     );
 
     while (true) {
@@ -813,10 +868,10 @@ pub fn main() !void {
         last_ticks = now_ticks;
         frame_ns = @min(frame_ns, max_frame_ns);
 
-        if (try loader.maybeReload()) {
-            try validateModuleMemory(&loader, &storage);
-            loader.current.api.on_reload(storage.memory());
-            std.debug.print("Reloaded {s}\n", .{loader.config.module_name});
+        if (try module.maybeReload()) {
+            try validateModuleMemory(module.api(), &storage);
+            module.api().on_reload(storage.memory());
+            std.debug.print("Reloaded {s}\n", .{module.moduleName()});
         }
 
         const frame_input = try snapshotInput(window);
@@ -830,7 +885,7 @@ pub fn main() !void {
 
         while (update_accum >= update_step_ns and caught_up < max_catchup_updates) : (caught_up += 1) {
             update_tick += 1;
-            loader.current.api.update(storage.memory(), .{
+            module.api().update(storage.memory(), .{
                 .dt_ns = update_step_ns,
                 .tick_index = update_tick,
                 .input = update_input,
@@ -867,7 +922,7 @@ pub fn main() !void {
                 },
             };
 
-            loader.current.api.render(storage.memory(), .{
+            module.api().render(storage.memory(), .{
                 .dt_ns = render_step_ns,
                 .tick_index = render_tick,
                 .input = render_input,
