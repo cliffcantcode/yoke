@@ -45,9 +45,9 @@ YOKE_TRACY_API void yoke_tracy_set_thread_name(const char* name) {
 
 YOKE_TRACY_API void yoke_tracy_message(const char* txt, size_t size, uint32_t color) {
     if (color != 0) {
-        ___tracy_emit_messageC(txt, size, color, TRACY_CALLSTACK);
+        TracyCMessageC(txt, size, color);
     } else {
-        ___tracy_emit_message(txt, size, TRACY_CALLSTACK);
+        TracyCMessage(txt, size);
     }
 }
 

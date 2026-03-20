@@ -36,7 +36,10 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(lib);
     }
 
-    bs.addHotStep(b, "hot", "Build/install only work_module.", work_mod);
+    if (!tracy.enable) {
+        bs.addHotStep(b, "hot", "Build/install only work_module.", work_mod);
+    }
+
     bs.addRunInstalledArtifact(b, exe, "run", "Run yoke_win32.");
 }
 

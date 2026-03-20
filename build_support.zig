@@ -96,11 +96,11 @@ pub fn makeTracyOptions(b: *std.Build) TracyOptions {
     return .{
         .enable = b.option(bool, "tracy", "Enable Tracy profiling") orelse false,
 
-        .callstack_depth = 8,
-        .on_demand = true,
+        .callstack_depth = 0,
+        .on_demand = false,
         .only_localhost = true,
-        .delayed_init = false,
-        .manual_lifetime = false,
+        .delayed_init = true,
+        .manual_lifetime = true,
     };
 }
 
@@ -152,13 +152,20 @@ pub fn addTracyRuntimeLibrary(
 
     lib.addIncludePath(b.path("third_party/tracy/public"));
 
-    lib.addCSourceFiles(.{
-        .root = b.path("."),
-        .files = &.{
-            "third_party/tracy/public/TracyClient.cpp",
-            "src/tracy_shim.cpp",
+    // Tracy third-party source: silence its Windows/clang format diagnostics locally.
+    lib.addCSourceFile(.{
+        .file = b.path("third_party/tracy/public/TracyClient.cpp"),
+        .flags = &.{
+            "-std=c++11",
+            "-Wno-format",
         },
-        .flags = &.{"-std=c++11"},
+    });
+
+    lib.addCSourceFile(.{
+        .file = b.path("src/tracy_shim.cpp"),
+        .flags = &.{
+            "-std=c++11",
+        },
     });
 
     addTracyDefine(lib, "TRACY_ENABLE", null);
@@ -175,6 +182,10 @@ pub fn addTracyRuntimeLibrary(
     if (tracy.only_localhost) {
         addTracyDefine(lib, "TRACY_ONLY_LOCALHOST", null);
     }
+
+    // Compile-first defaults for Windows+Clang right now.
+    addTracyDefine(lib, "TRACY_NO_CONTEXT_SWITCH", null);
+    addTracyDefine(lib, "TRACY_NO_SYSTEM_TRACING", null);
 
     if (tracy.delayed_init) {
         addTracyDefine(lib, "TRACY_DELAYED_INIT", null);

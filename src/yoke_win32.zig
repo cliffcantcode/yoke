@@ -1,6 +1,9 @@
 const std = @import("std");
+
 const abi = @import("abi.zig");
 const hot_reload = @import("hot_reload.zig");
+
+const tracy = @import("tracy.zig");
 
 const BOOL = i32;
 const UINT = u32;
@@ -756,6 +759,13 @@ fn validateModuleMemory(loader: *const hot_reload.Loader, storage: *ModuleStorag
 }
 
 pub fn main() !void {
+    tracy.startup();
+    defer tracy.shutdown();
+
+    tracy.setThreadName("main");
+    var startup_zone = tracy.zoneN("startup");
+    defer startup_zone.end();
+
     const allocator = std.heap.page_allocator;
 
     var clock = try Clock.init();
@@ -792,6 +802,10 @@ pub fn main() !void {
     );
 
     while (true) {
+        tracy.frameMark();
+        var main_loop_zone = tracy.zoneN("main_loop");
+        defer main_loop_zone.end();
+
         if (!pumpMessages()) break;
 
         const now_ticks = try clock.nowTicks();

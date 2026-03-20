@@ -7,6 +7,8 @@ const text = @import("text.zig");
 const widgets = @import("widgets.zig");
 const layout = @import("layout.zig");
 
+const tracy = @import("tracy.zig");
+
 const WorkState = struct {
     reload_count: u32 = 0,
     update_count: u64 = 0,
@@ -35,6 +37,9 @@ fn onReload(memory: *abi.PlatformMemory) callconv(.c) void {
 }
 
 fn update(memory: *abi.PlatformMemory, ctx: abi.TickContext) callconv(.c) void {
+    var zone = tracy.zoneN("update");
+    defer zone.end();
+
     const state = getState(memory);
     state.update_count += 1;
 
@@ -46,13 +51,15 @@ fn update(memory: *abi.PlatformMemory, ctx: abi.TickContext) callconv(.c) void {
 }
 
 fn render(memory: *abi.PlatformMemory, ctx: abi.TickContext, frame: *abi.Frame) callconv(.c) void {
+    var zone = tracy.zoneN("render");
+    defer zone.end();
+
     const state = getState(memory);
     state.render_count += 1;
 
     defer draw.cursorSquare(frame, ctx.input.mouse_x, ctx.input.mouse_y, theme.cursor);
 
     draw.begin(frame, theme);
-    draw.originMarker(frame, theme);
 
     state.panel.draw_panel(frame, theme, ctx, 10.0);
 
