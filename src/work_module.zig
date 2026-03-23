@@ -37,7 +37,7 @@ fn onReload(memory: *abi.PlatformMemory) callconv(.c) void {
 }
 
 fn update(memory: *abi.PlatformMemory, ctx: abi.TickContext) callconv(.c) void {
-    var zone = tracy.zoneN("update");
+    var zone = tracy.zoneN("work_update");
     defer zone.end();
 
     const state = getState(memory);
@@ -51,7 +51,7 @@ fn update(memory: *abi.PlatformMemory, ctx: abi.TickContext) callconv(.c) void {
 }
 
 fn render(memory: *abi.PlatformMemory, ctx: abi.TickContext, frame: *abi.Frame) callconv(.c) void {
-    var zone = tracy.zoneN("render");
+    var zone = tracy.zoneN("work_render");
     defer zone.end();
 
     const state = getState(memory);

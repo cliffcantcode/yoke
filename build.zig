@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const options = bs.standardOptions(b);
 
     const tracy = bs.makeTracyOptions(b);
+    bs.applyTracyBuildMode(b, tracy);
     bs.validateTracyOptions(tracy);
 
     const hot_reload_enable = !tracy.enable;

@@ -2,13 +2,13 @@ const std = @import("std");
 
 const build_options = @import("build_options");
 const abi = @import("abi.zig");
-const hot_reload = if (build_options.hot_reload_enabled) @import("hot_reload.zig") else struct {};
+const hot_reload = if (build_options.hot_reload_enable) @import("hot_reload.zig") else struct {};
 
 const tracy = @import("tracy.zig");
 
 extern fn yoke_get_api() callconv(.c) *const abi.Api;
 
-const ModuleBinding = if (build_options.hot_reload_enabled)
+const ModuleBinding = if (build_options.hot_reload_enable)
     struct {
         loader: hot_reload.Loader,
 
@@ -858,24 +858,44 @@ pub fn main() !void {
 
     while (true) {
         tracy.frameMark();
-        var main_loop_zone = tracy.zoneN("main_loop");
-        defer main_loop_zone.end();
 
-        if (!pumpMessages()) break;
+        {
+            var z = tracy.zoneN("yoke_pump_messages");
+            defer z.end();
+
+            if (!pumpMessages()) break;
+        }
 
         const now_ticks = try clock.nowTicks();
         var frame_ns = clock.deltaNs(last_ticks, now_ticks);
         last_ticks = now_ticks;
         frame_ns = @min(frame_ns, max_frame_ns);
 
-        if (try module.maybeReload()) {
-            try validateModuleMemory(module.api(), &storage);
-            module.api().on_reload(storage.memory());
-            std.debug.print("Reloaded {s}\n", .{module.moduleName()});
+        {
+            var z = tracy.zoneN("yoke_reload");
+            defer z.end();
+            if (try module.maybeReload()) {
+                z.text(module.moduleName());
+                tracy.message("work module reloaded");
+                try validateModuleMemory(module.api(), &storage);
+                module.api().on_reload(storage.memory());
+            }
         }
 
-        const frame_input = try snapshotInput(window);
-        try backbuffer.resize(allocator, frame_input.client_width, frame_input.client_height);
+        var frame_input: abi.Input = undefined;
+        {
+            var z = tracy.zoneN("yoke_snapshot_input");
+            defer z.end();
+
+            frame_input = try snapshotInput(window);
+        }
+
+        {
+            var z = tracy.zoneN("yoke_resize_backbuffer");
+            defer z.end();
+
+            try backbuffer.resize(allocator, frame_input.client_width, frame_input.client_height);
+        }
 
         update_accum += frame_ns;
         render_accum += frame_ns;
@@ -884,7 +904,11 @@ pub fn main() !void {
         var update_input = frame_input;
 
         while (update_accum >= update_step_ns and caught_up < max_catchup_updates) : (caught_up += 1) {
+            var z = tracy.zoneN("yoke_update");
+            defer z.end();
+
             update_tick += 1;
+            z.value(update_tick);
             module.api().update(storage.memory(), .{
                 .dt_ns = update_step_ns,
                 .tick_index = update_tick,
@@ -903,7 +927,11 @@ pub fn main() !void {
         }
 
         if (render_accum >= render_step_ns and backbuffer.memory.len != 0) {
+            var z = tracy.zoneN("yoke_render");
+            defer z.end();
+
             render_tick += 1;
+            z.value(render_tick);
 
             var render_input = frame_input;
             render_input.escape.changed = 0;
@@ -940,6 +968,10 @@ pub fn main() !void {
         const sleep_ns = @min(until_update, until_render);
 
         if (sleep_ns > 250 * std.time.ns_per_us) {
+            var z = tracy.zoneN("yoke_sleep");
+            defer z.end();
+
+            z.value(sleep_ns / std.time.ns_per_us);
             std.Thread.sleep(sleep_ns / 2);
         }
     }
