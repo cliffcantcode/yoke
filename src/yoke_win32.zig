@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const math = @import("math.zig");
+const assert = @import("assert.zig");
 const build_options = @import("build_options");
 const abi = @import("abi.zig");
 const hot_reload = if (build_options.hot_reload_enable) @import("hot_reload.zig") else struct {};
@@ -468,14 +470,24 @@ const Win32Backbuffer = struct {
 };
 
 fn backbufferClear(buffer: *Win32Backbuffer, color: u32) void {
-    var y: u32 = 0;
-    while (y < buffer.height) : (y += 1) {
-        const row_base = buffer.memory.ptr + @as(usize, y) * @as(usize, buffer.pitch);
-        const row: [*]u32 = @ptrCast(@alignCast(row_base));
-        var x: u32 = 0;
-        while (x < buffer.width) : (x += 1) {
-            row[x] = color;
-        }
+    var z = tracy.zoneN("yoke_backbufferClear");
+    defer z.end();
+
+    const pixel_count = @as(usize, buffer.width) * buffer.height;
+    const pixels: []u32 = @ptrCast(@alignCast(buffer.memory));
+
+    const lane_count = 8; // 256-bit worth of u32s
+    const Vec = @Vector(lane_count, u32);
+    const fill: Vec = @splat(color);
+
+    var i: usize = 0;
+    while (i + lane_count <= pixel_count) : (i += lane_count) {
+        const dst: *align(1) Vec = @ptrCast(pixels[i .. i + lane_count].ptr);
+        dst.* = fill;
+    }
+
+    while (i < pixel_count) : (i += 1) {
+        pixels[i] = color;
     }
 }
 
@@ -488,6 +500,9 @@ fn backbufferLine(
     thickness_in: i32,
     color: u32,
 ) void {
+    var z = tracy.zoneN("yoke_backbufferLine");
+    defer z.end();
+
     var x0 = x0_in;
     var y0 = y0_in;
     const x1 = x1_in;
@@ -528,6 +543,9 @@ fn backbufferLine(
 }
 
 fn backbufferFillRect(buffer: *Win32Backbuffer, x0_in: i32, y0_in: i32, x1_in: i32, y1_in: i32, color: u32) void {
+    var z = tracy.zoneN("yoke_backbufferFillRect");
+    defer z.end();
+
     const max_x: i32 = @intCast(buffer.width);
     const max_y: i32 = @intCast(buffer.height);
 
@@ -558,6 +576,9 @@ fn backbufferStrokeRect(
     thickness_in: i32,
     color: u32,
 ) void {
+    var z = tracy.zoneN("yoke_backbufferStrokeRect");
+    defer z.end();
+
     const t = @max(thickness_in, 1);
 
     backbufferFillRect(buffer, x0_in, y0_in, x1_in, y0_in + t, color); // bottom
@@ -615,21 +636,26 @@ fn presentBackbuffer(window: HWND, buffer: *const Win32Backbuffer) !void {
     const dc = GetDC(window) orelse return error.GetDCFailed;
     defer _ = ReleaseDC(window, dc);
 
-    _ = StretchDIBits(
-        dc,
-        0,
-        0,
-        @intCast(buffer.width),
-        @intCast(buffer.height),
-        0,
-        0,
-        @intCast(buffer.width),
-        @intCast(buffer.height),
-        @ptrCast(buffer.memory.ptr),
-        &buffer.info,
-        DIB_RGB_COLORS,
-        SRCCOPY,
-    );
+    {
+        var z = tracy.zoneN("yoke_StretchDIBits");
+        defer z.end();
+
+        _ = StretchDIBits(
+            dc,
+            0,
+            0,
+            @intCast(buffer.width),
+            @intCast(buffer.height),
+            0,
+            0,
+            @intCast(buffer.width),
+            @intCast(buffer.height),
+            @ptrCast(buffer.memory.ptr),
+            &buffer.info,
+            DIB_RGB_COLORS,
+            SRCCOPY,
+        );
+    }
 }
 
 fn updateButton(button: *HostButtonState, is_down: bool) void {
@@ -818,8 +844,6 @@ pub fn main() !void {
     defer tracy.shutdown();
 
     tracy.setThreadName("main");
-    var startup_zone = tracy.zoneN("startup");
-    defer startup_zone.end();
 
     const allocator = std.heap.page_allocator;
 
@@ -843,6 +867,10 @@ pub fn main() !void {
 
     const update_step_ns: u64 = std.time.ns_per_s / update_hz;
     const render_step_ns: u64 = std.time.ns_per_s / render_hz;
+    const loop_step_ns: u64 = render_step_ns;
+
+    var fps_guard = assert.FrameRateEmaGuard.init(@as(f64, @floatFromInt(render_hz)));
+    var skip_first_fps_sample = true;
 
     var last_ticks = try clock.nowTicks();
     var update_accum: u64 = 0;
@@ -859,17 +887,23 @@ pub fn main() !void {
     while (true) {
         tracy.frameMark();
 
+        const loop_start_ticks = try clock.nowTicks();
+        var frame_ns = clock.deltaNs(last_ticks, loop_start_ticks);
+        last_ticks = loop_start_ticks;
+        frame_ns = @min(frame_ns, max_frame_ns);
+
+        if (skip_first_fps_sample) {
+            skip_first_fps_sample = false;
+        } else {
+            fps_guard.pushFrameNs(frame_ns);
+        }
+
         {
             var z = tracy.zoneN("yoke_pump_messages");
             defer z.end();
 
             if (!pumpMessages()) break;
         }
-
-        const now_ticks = try clock.nowTicks();
-        var frame_ns = clock.deltaNs(last_ticks, now_ticks);
-        last_ticks = now_ticks;
-        frame_ns = @min(frame_ns, max_frame_ns);
 
         {
             var z = tracy.zoneN("yoke_reload");
@@ -950,29 +984,49 @@ pub fn main() !void {
                 },
             };
 
-            module.api().render(storage.memory(), .{
-                .dt_ns = render_step_ns,
-                .tick_index = render_tick,
-                .input = render_input,
-            }, &frame);
+            {
+                var wz = tracy.zoneN("yoke_work_render");
+                defer wz.end();
 
-            executeRenderCommands(&backbuffer, &frame);
-            try presentBackbuffer(window, &backbuffer);
+                module.api().render(storage.memory(), .{
+                    .dt_ns = render_step_ns,
+                    .tick_index = render_tick,
+                    .input = render_input,
+                }, &frame);
+            }
+
+            {
+                var ez = tracy.zoneN("yoke_render_commands");
+                defer ez.end();
+
+                executeRenderCommands(&backbuffer, &frame);
+            }
+
+            {
+                var pz = tracy.zoneN("yoke_present_backbuffer");
+                defer pz.end();
+
+                try presentBackbuffer(window, &backbuffer);
+            }
+
             render_accum %= render_step_ns;
         }
 
         clearInputTransitions();
 
-        const until_update = update_step_ns - update_accum;
-        const until_render = render_step_ns - render_accum;
-        const sleep_ns = @min(until_update, until_render);
-
-        if (sleep_ns > 250 * std.time.ns_per_us) {
-            var z = tracy.zoneN("yoke_sleep");
+        {
+            var z = tracy.zoneN("yoke_idle");
             defer z.end();
 
-            z.value(sleep_ns / std.time.ns_per_us);
-            std.Thread.sleep(sleep_ns / 2);
+            var elapsed_since_loop_start_ns = clock.deltaNs(loop_start_ticks, try clock.nowTicks());
+
+            while (elapsed_since_loop_start_ns < loop_step_ns) {
+                std.atomic.spinLoopHint();
+                elapsed_since_loop_start_ns = clock.deltaNs(loop_start_ticks, try clock.nowTicks());
+            }
+
+            const late_ns = elapsed_since_loop_start_ns -| loop_step_ns;
+            z.value(late_ns);
         }
     }
 }
