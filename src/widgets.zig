@@ -100,12 +100,29 @@ pub const DraggablePanel = struct {
 
         draw.panel(frame, self.rect, fill, border);
 
-        draw.fillRect(frame, .{
-            .x = self.rect.x,
-            .y = self.rect.top() - header_height,
-            .w = self.rect.w,
-            .h = header_height,
-        }, if (self.dragging) theme.accent_active else if (hovering) theme.accent_hover else theme.accent);
+        const header_color = if (self.dragging)
+            theme.accent_active
+        else if (hovering)
+            theme.accent_hover
+        else
+            theme.accent;
+
+        const header_rect = draw.rect(
+            self.rect.x + draw.panel_border_thickness,
+            self.rect.top() - header_height,
+            @max(self.rect.w - 2.0 * draw.panel_border_thickness, 0.0),
+            @max(header_height - draw.panel_border_thickness, 0.0),
+        );
+
+        if (header_rect.w > 0 and header_rect.h > 0) {
+            draw.fillRoundedRect(
+                frame,
+                header_rect,
+                header_color,
+                @max(draw.panel_corner_radius - draw.panel_border_thickness, 0.0),
+                draw.RoundedCorners.top,
+            );
+        }
     }
 
     fn asserts(self: *const DraggablePanel) void {

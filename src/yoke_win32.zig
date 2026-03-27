@@ -7,6 +7,8 @@ const abi = @import("abi.zig");
 const hot_reload = if (build_options.hot_reload_enable) @import("hot_reload.zig") else struct {};
 
 const tracy = @import("tracy.zig");
+const themes = @import("themes.zig");
+const panel_grid = @import("panel_grid.zig");
 
 extern fn yoke_get_api() callconv(.c) *const abi.Api;
 
@@ -518,26 +520,32 @@ fn backbufferLine(
     const thickness = @max(thickness_in, 1);
     const radius = @divFloor(thickness - 1, 2);
 
-    while (true) {
-        backbufferFillRect(
-            buffer,
-            x0 - radius,
-            y0 - radius,
-            x0 + radius + 1,
-            y0 + radius + 1,
-            color,
-        );
+    if (y0 == y1) return backbufferFillRect(buffer, @min(x0, x1), (y0 - radius), (@max(x0, x1) + 1), (y0 + radius + 1), color);
 
-        if (x0 == x1 and y0 == y1) break;
+    if (x0 == x1) return backbufferFillRect(buffer, (x0 - radius), @min(y0, y1), (x0 + radius + 1), (@max(y0, y1) + 1), color);
 
-        const e2 = err * 2;
-        if (e2 >= dy) {
-            err += dy;
-            x0 += sx;
-        }
-        if (e2 <= dx) {
-            err += dx;
-            y0 += sy;
+    if (thickness == 1) {
+        while (true) {
+            backbufferFillRect(
+                buffer,
+                x0 - radius,
+                y0 - radius,
+                x0 + radius + 1,
+                y0 + radius + 1,
+                color,
+            );
+
+            if (x0 == x1 and y0 == y1) break;
+
+            const e2 = err * 2;
+            if (e2 >= dy) {
+                err += dy;
+                x0 += sx;
+            }
+            if (e2 <= dx) {
+                err += dx;
+                y0 += sy;
+            }
         }
     }
 }
@@ -556,14 +564,15 @@ fn backbufferFillRect(buffer: *Win32Backbuffer, x0_in: i32, y0_in: i32, x1_in: i
 
     if (x0 >= x1 or y0 >= y1) return;
 
+    const pitch_pixels: usize = @divExact(buffer.pitch, @sizeOf(u32));
+    const pixels: [*]u32 = @ptrCast(@alignCast(buffer.memory.ptr));
+    const row_width: usize = @intCast(x1 - x0);
+    const x0_usized: usize = @intCast(x0);
+
     var y = y0;
     while (y < y1) : (y += 1) {
-        const row_base = buffer.memory.ptr + @as(usize, @intCast(y)) * @as(usize, buffer.pitch);
-        const row: [*]u32 = @ptrCast(@alignCast(row_base));
-        var x = x0;
-        while (x < x1) : (x += 1) {
-            row[@as(usize, @intCast(x))] = color;
-        }
+        const row_start = @as(usize, @intCast(y)) * pitch_pixels + x0_usized;
+        @memset(pixels[row_start..(row_start + row_width)], color);
     }
 }
 
@@ -851,6 +860,10 @@ pub fn main() !void {
     var module = try ModuleBinding.init(allocator);
     defer module.deinit(allocator);
 
+    var yoke_panels = panel_grid.PanelGrid.init(allocator);
+    defer yoke_panels.deinit();
+    const yoke_theme = themes.default;
+
     var storage = try ModuleStorage.init(.{
         .permanent_storage_size = permanent_storage_size,
         .transient_storage_size = transient_storage_size,
@@ -993,6 +1006,17 @@ pub fn main() !void {
                     .tick_index = render_tick,
                     .input = render_input,
                 }, &frame);
+            }
+
+            {
+                var yz = tracy.zoneN("yoke_panel_grid");
+                defer yz.end();
+
+                try panel_grid.render(&yoke_panels, &frame, yoke_theme, .{
+                    .dt_ns = render_step_ns,
+                    .tick_index = render_tick,
+                    .input = render_input,
+                });
             }
 
             {
