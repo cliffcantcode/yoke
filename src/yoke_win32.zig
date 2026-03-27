@@ -890,6 +890,7 @@ pub fn main() !void {
     var render_accum: u64 = 0;
     var update_tick: u64 = 0;
     var render_tick: u64 = 0;
+    var reload_count: u32 = 0;
     var render_commands: [max_render_commands]abi.RenderCommand = undefined;
 
     std.debug.print(
@@ -922,6 +923,7 @@ pub fn main() !void {
             var z = tracy.zoneN("yoke_reload");
             defer z.end();
             if (try module.maybeReload()) {
+                reload_count += 1;
                 z.text(module.moduleName());
                 tracy.message("work module reloaded");
                 try validateModuleMemory(module.api(), &storage);
@@ -1015,6 +1017,12 @@ pub fn main() !void {
                 try panel_grid.render(&yoke_panels, &frame, yoke_theme, .{
                     .dt_ns = render_step_ns,
                     .tick_index = render_tick,
+                    .input = render_input,
+                }, .{
+                    .module_name = module.moduleName(),
+                    .reload_count = reload_count,
+                    .update_count = update_tick,
+                    .render_count = render_tick,
                     .input = render_input,
                 });
             }
