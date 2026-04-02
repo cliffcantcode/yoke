@@ -4,11 +4,14 @@ const math = @import("math.zig");
 const assert = @import("assert.zig");
 const build_options = @import("build_options");
 const abi = @import("abi.zig");
+const themes = @import("themes.zig");
+const panel_grid = @import("panel_grid.zig");
+const canvas_fit = @import("canvas_fit.zig");
+const draw = @import("draw.zig");
+const reflection = @import("reflection.zig");
 const hot_reload = if (build_options.hot_reload_enable) @import("hot_reload.zig") else struct {};
 
 const tracy = @import("tracy.zig");
-const themes = @import("themes.zig");
-const panel_grid = @import("panel_grid.zig");
 
 extern fn yoke_get_api() callconv(.c) *const abi.Api;
 
@@ -153,6 +156,10 @@ pub const ModuleStorage = struct {
     total_size: u64,
     transient_offset: u64,
     platform_memory: abi.PlatformMemory,
+
+    comptime {
+        reflection.assertNoWastedBytePadding(@This());
+    }
 
     pub fn init(config: Config) !ModuleStorage {
         const alignment: u64 = abi.module_state_alignment;
@@ -383,6 +390,10 @@ const Clock = struct {
 const HostButtonState = struct {
     is_down: bool = false,
     changed: bool = false,
+
+    comptime {
+        reflection.assertNoWastedBytePadding(@This());
+    }
 };
 
 const HostInputState = struct {
@@ -392,6 +403,11 @@ const HostInputState = struct {
     escape: HostButtonState = .{},
     space: HostButtonState = .{},
     mouse_left: HostButtonState = .{},
+    _padding: [1]u8 = undefined,
+
+    comptime {
+        reflection.assertNoWastedBytePadding(@This());
+    }
 };
 
 var g_input_state: HostInputState = .{};
@@ -471,6 +487,34 @@ const Win32Backbuffer = struct {
     }
 };
 
+const ClipRect = struct {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+
+    fn isEmpty(self: ClipRect) bool {
+        return self.x0 >= self.x1 or self.y0 >= self.y1;
+    }
+};
+
+fn fullClipRect(buffer: *const Win32Backbuffer) ClipRect {
+    return .{
+        .x0 = 0,
+        .y0 = 0,
+        .x1 = @intCast(buffer.width),
+        .y1 = @intCast(buffer.height),
+    };
+}
+
+fn intersectClipRect(a: ClipRect, b: ClipRect) ClipRect {
+    const x0 = @max(a.x0, b.x0);
+    const y0 = @max(a.y0, b.y0);
+    const x1 = @max(x0, @min(a.x1, b.x1));
+    const y1 = @max(y0, @min(a.y1, b.y1));
+    return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 };
+}
+
 fn backbufferClear(buffer: *Win32Backbuffer, color: u32) void {
     var z = tracy.zoneN("yoke_backbufferClear");
     defer z.end();
@@ -493,8 +537,9 @@ fn backbufferClear(buffer: *Win32Backbuffer, color: u32) void {
     }
 }
 
-fn backbufferLine(
+fn backbufferLineIntClipped(
     buffer: *Win32Backbuffer,
+    clip: ClipRect,
     x0_in: i32,
     y0_in: i32,
     x1_in: i32,
@@ -502,9 +547,6 @@ fn backbufferLine(
     thickness_in: i32,
     color: u32,
 ) void {
-    var z = tracy.zoneN("yoke_backbufferLine");
-    defer z.end();
-
     var x0 = x0_in;
     var y0 = y0_in;
     const x1 = x1_in;
@@ -518,49 +560,188 @@ fn backbufferLine(
     var err: i32 = dx + dy;
 
     const thickness = @max(thickness_in, 1);
-    const radius = @divFloor(thickness - 1, 2);
+    const half_lo = @divFloor(thickness - 1, 2);
+    const half_hi = thickness - half_lo;
 
-    if (y0 == y1) return backbufferFillRect(buffer, @min(x0, x1), (y0 - radius), (@max(x0, x1) + 1), (y0 + radius + 1), color);
+    if (y0 == y1) {
+        return backbufferFillRectClipped(
+            buffer,
+            clip,
+            @min(x0, x1),
+            y0 - half_lo,
+            @max(x0, x1) + 1,
+            y0 + half_hi,
+            color,
+        );
+    }
 
-    if (x0 == x1) return backbufferFillRect(buffer, (x0 - radius), @min(y0, y1), (x0 + radius + 1), (@max(y0, y1) + 1), color);
+    if (x0 == x1) {
+        return backbufferFillRectClipped(
+            buffer,
+            clip,
+            x0 - half_lo,
+            @min(y0, y1),
+            x0 + half_hi,
+            @max(y0, y1) + 1,
+            color,
+        );
+    }
 
-    if (thickness == 1) {
-        while (true) {
-            backbufferFillRect(
-                buffer,
-                x0 - radius,
-                y0 - radius,
-                x0 + radius + 1,
-                y0 + radius + 1,
-                color,
-            );
+    while (true) {
+        backbufferFillRectClipped(
+            buffer,
+            clip,
+            x0 - half_lo,
+            y0 - half_lo,
+            x0 + half_hi,
+            y0 + half_hi,
+            color,
+        );
 
-            if (x0 == x1 and y0 == y1) break;
+        if (x0 == x1 and y0 == y1) break;
 
-            const e2 = err * 2;
-            if (e2 >= dy) {
-                err += dy;
-                x0 += sx;
-            }
-            if (e2 <= dx) {
-                err += dx;
-                y0 += sy;
+        const e2 = err * 2;
+        if (e2 >= dy) {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn backbufferLine(
+    buffer: *Win32Backbuffer,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    thickness_in: f32,
+    color: u32,
+) void {
+    backbufferLineClipped(buffer, fullClipRect(buffer), x0, y0, x1, y1, thickness_in, color);
+}
+
+fn backbufferLineThickClipped(
+    buffer: *Win32Backbuffer,
+    clip: ClipRect,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    thickness: f32,
+    color: u32,
+) void {
+    if (buffer.width == 0 or buffer.height == 0) return;
+
+    const radius = thickness * 0.5;
+    const min_x = std.math.clamp(
+        @as(i32, @intFromFloat(@floor(@min(x0, x1) - radius))),
+        clip.x0,
+        clip.x1,
+    );
+    const min_y = std.math.clamp(
+        @as(i32, @intFromFloat(@floor(@min(y0, y1) - radius))),
+        clip.y0,
+        clip.y1,
+    );
+    const max_x = std.math.clamp(
+        @as(i32, @intFromFloat(@ceil(@max(x0, x1) + radius))),
+        clip.x0,
+        clip.x1,
+    );
+    const max_y = std.math.clamp(
+        @as(i32, @intFromFloat(@ceil(@max(y0, y1) + radius))),
+        clip.y0,
+        clip.y1,
+    );
+
+    if (min_x >= max_x or min_y >= max_y) return;
+
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const len_sq = dx * dx + dy * dy;
+    const radius_sq = radius * radius;
+
+    const pitch_pixels: usize = @divExact(buffer.pitch, @sizeOf(u32));
+    const pixels: [*]u32 = @ptrCast(@alignCast(buffer.memory.ptr));
+
+    var py_i = min_y;
+    while (py_i < max_y) : (py_i += 1) {
+        const py = @as(f32, @floatFromInt(py_i)) + 0.5;
+        const row_start = @as(usize, @intCast(py_i)) * pitch_pixels;
+
+        var px_i = min_x;
+        while (px_i < max_x) : (px_i += 1) {
+            const px = @as(f32, @floatFromInt(px_i)) + 0.5;
+
+            const t = if (len_sq > 0.0)
+                std.math.clamp(((px - x0) * dx + (py - y0) * dy) / len_sq, 0.0, 1.0)
+            else
+                0.0;
+
+            const closest_x = x0 + dx * t;
+            const closest_y = y0 + dy * t;
+            const dist_x = px - closest_x;
+            const dist_y = py - closest_y;
+
+            if (dist_x * dist_x + dist_y * dist_y <= radius_sq) {
+                pixels[row_start + @as(usize, @intCast(px_i))] = color;
             }
         }
     }
 }
 
-fn backbufferFillRect(buffer: *Win32Backbuffer, x0_in: i32, y0_in: i32, x1_in: i32, y1_in: i32, color: u32) void {
+fn backbufferLineClipped(
+    buffer: *Win32Backbuffer,
+    clip: ClipRect,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    thickness_in: f32,
+    color: u32,
+) void {
+    var z = tracy.zoneN("yoke_backbufferLine");
+    defer z.end();
+
+    const thickness = @max(thickness_in, 1.0);
+    if (thickness <= 1.0) {
+        return backbufferLineIntClipped(
+            buffer,
+            clip,
+            @as(i32, @intFromFloat(x0)),
+            @as(i32, @intFromFloat(y0)),
+            @as(i32, @intFromFloat(x1)),
+            @as(i32, @intFromFloat(y1)),
+            1,
+            color,
+        );
+    }
+
+    backbufferLineThickClipped(buffer, clip, x0, y0, x1, y1, thickness, color);
+}
+
+fn backbufferFillRectClipped(
+    buffer: *Win32Backbuffer,
+    clip: ClipRect,
+    x0_in: i32,
+    y0_in: i32,
+    x1_in: i32,
+    y1_in: i32,
+    color: u32,
+) void {
     var z = tracy.zoneN("yoke_backbufferFillRect");
     defer z.end();
 
-    const max_x: i32 = @intCast(buffer.width);
-    const max_y: i32 = @intCast(buffer.height);
+    if (clip.isEmpty()) return;
 
-    const x0 = std.math.clamp(x0_in, 0, max_x);
-    const y0 = std.math.clamp(y0_in, 0, max_y);
-    const x1 = std.math.clamp(x1_in, 0, max_x);
-    const y1 = std.math.clamp(y1_in, 0, max_y);
+    const x0 = std.math.clamp(x0_in, clip.x0, clip.x1);
+    const y0 = std.math.clamp(y0_in, clip.y0, clip.y1);
+    const x1 = std.math.clamp(x1_in, clip.x0, clip.x1);
+    const y1 = std.math.clamp(y1_in, clip.y0, clip.y1);
 
     if (x0 >= x1 or y0 >= y1) return;
 
@@ -576,8 +757,13 @@ fn backbufferFillRect(buffer: *Win32Backbuffer, x0_in: i32, y0_in: i32, x1_in: i
     }
 }
 
-fn backbufferStrokeRect(
+fn backbufferFillRect(buffer: *Win32Backbuffer, x0_in: i32, y0_in: i32, x1_in: i32, y1_in: i32, color: u32) void {
+    backbufferFillRectClipped(buffer, fullClipRect(buffer), x0_in, y0_in, x1_in, y1_in, color);
+}
+
+fn backbufferStrokeRectClipped(
     buffer: *Win32Backbuffer,
+    clip: ClipRect,
     x0_in: i32,
     y0_in: i32,
     x1_in: i32,
@@ -590,21 +776,47 @@ fn backbufferStrokeRect(
 
     const t = @max(thickness_in, 1);
 
-    backbufferFillRect(buffer, x0_in, y0_in, x1_in, y0_in + t, color); // bottom
-    backbufferFillRect(buffer, x0_in, y1_in - t, x1_in, y1_in, color); // top
-    backbufferFillRect(buffer, x0_in, y0_in + t, x0_in + t, y1_in - t, color); // left
-    backbufferFillRect(buffer, x1_in - t, y0_in + t, x1_in, y1_in - t, color); // right
+    backbufferFillRectClipped(buffer, clip, x0_in, y0_in, x1_in, y0_in + t, color); // bottom
+    backbufferFillRectClipped(buffer, clip, x0_in, y1_in - t, x1_in, y1_in, color); // top
+    backbufferFillRectClipped(buffer, clip, x0_in, y0_in + t, x0_in + t, y1_in - t, color); // left
+    backbufferFillRectClipped(buffer, clip, x1_in - t, y0_in + t, x1_in, y1_in - t, color); // right
+}
+
+fn backbufferStrokeRect(
+    buffer: *Win32Backbuffer,
+    x0_in: i32,
+    y0_in: i32,
+    x1_in: i32,
+    y1_in: i32,
+    thickness_in: i32,
+    color: u32,
+) void {
+    backbufferStrokeRectClipped(buffer, fullClipRect(buffer), x0_in, y0_in, x1_in, y1_in, thickness_in, color);
 }
 
 fn executeRenderCommands(buffer: *Win32Backbuffer, frame: *const abi.Frame) void {
+    const full_clip = fullClipRect(buffer);
+    var clip_stack: [32]ClipRect = undefined;
+    clip_stack[0] = full_clip;
+    var clip_depth: usize = 1;
+
     var i: u32 = 0;
     while (i < frame.command_buffer.count) : (i += 1) {
         const cmd = frame.command_buffer.commands[i];
         const kind: abi.RenderCommandKind = @enumFromInt(cmd.kind);
+        const clip = clip_stack[clip_depth - 1];
+
         switch (kind) {
-            .clear => backbufferClear(buffer, cmd.color),
-            .fill_rect => backbufferFillRect(
+            .clear => {
+                if (clip_depth == 1) {
+                    backbufferClear(buffer, cmd.color);
+                } else {
+                    backbufferFillRectClipped(buffer, clip, clip.x0, clip.y0, clip.x1, clip.y1, cmd.color);
+                }
+            },
+            .fill_rect => backbufferFillRectClipped(
                 buffer,
+                clip,
                 @intFromFloat(cmd.x0),
                 @intFromFloat(cmd.y0),
                 @intFromFloat(cmd.x1),
@@ -613,8 +825,9 @@ fn executeRenderCommands(buffer: *Win32Backbuffer, frame: *const abi.Frame) void
             ),
             .stroke_rect => {
                 const thickness = @max(1, @as(i32, @intFromFloat(cmd.thickness)));
-                backbufferStrokeRect(
+                backbufferStrokeRectClipped(
                     buffer,
+                    clip,
                     @intFromFloat(cmd.x0),
                     @intFromFloat(cmd.y0),
                     @intFromFloat(cmd.x1),
@@ -623,17 +836,32 @@ fn executeRenderCommands(buffer: *Win32Backbuffer, frame: *const abi.Frame) void
                     cmd.color,
                 );
             },
-            .line => {
-                const thickness = @max(1, @as(i32, @intFromFloat(cmd.thickness)));
-                backbufferLine(
-                    buffer,
-                    @intFromFloat(cmd.x0),
-                    @intFromFloat(cmd.y0),
-                    @intFromFloat(cmd.x1),
-                    @intFromFloat(cmd.y1),
-                    thickness,
-                    cmd.color,
-                );
+            .line => backbufferLineClipped(
+                buffer,
+                clip,
+                cmd.x0,
+                cmd.y0,
+                cmd.x1,
+                cmd.y1,
+                cmd.thickness,
+                cmd.color,
+            ),
+            .push_clip => {
+                assert.hard(clip_depth < clip_stack.len, "render clip stack overflow", .{});
+                if (clip_depth < clip_stack.len) {
+                    const next_clip = intersectClipRect(clip, .{
+                        .x0 = @intFromFloat(cmd.x0),
+                        .y0 = @intFromFloat(cmd.y0),
+                        .x1 = @intFromFloat(cmd.x1),
+                        .y1 = @intFromFloat(cmd.y1),
+                    });
+                    clip_stack[clip_depth] = next_clip;
+                    clip_depth += 1;
+                }
+            },
+            .pop_clip => {
+                assert.hard(clip_depth > 1, "render clip stack underflow", .{});
+                if (clip_depth > 1) clip_depth -= 1;
             },
         }
     }
@@ -848,6 +1076,10 @@ fn validateModuleMemory(api: *const abi.Api, storage: *ModuleStorage) !void {
     }
 }
 
+fn nsToMsF32(ns: u64) f32 {
+    return @as(f32, @floatFromInt(ns)) / @as(f32, @floatFromInt(std.time.ns_per_ms));
+}
+
 pub fn main() !void {
     tracy.startup();
     defer tracy.shutdown();
@@ -891,6 +1123,7 @@ pub fn main() !void {
     var update_tick: u64 = 0;
     var render_tick: u64 = 0;
     var reload_count: u32 = 0;
+    var dashboard_telemetry = panel_grid.Telemetry{};
     var render_commands: [max_render_commands]abi.RenderCommand = undefined;
 
     std.debug.print(
@@ -910,6 +1143,7 @@ pub fn main() !void {
             skip_first_fps_sample = false;
         } else {
             fps_guard.pushFrameNs(frame_ns);
+            dashboard_telemetry.frame.push(nsToMsF32(frame_ns));
         }
 
         {
@@ -958,11 +1192,15 @@ pub fn main() !void {
 
             update_tick += 1;
             z.value(update_tick);
+
+            const work_update_start_ticks = try clock.nowTicks();
             module.api().update(storage.memory(), .{
                 .dt_ns = update_step_ns,
                 .tick_index = update_tick,
                 .input = update_input,
             });
+            const work_update_end_ticks = try clock.nowTicks();
+            dashboard_telemetry.update.push(nsToMsF32(clock.deltaNs(work_update_start_ticks, work_update_end_ticks)));
 
             update_input.escape.changed = 0;
             update_input.space.changed = 0;
@@ -999,16 +1237,7 @@ pub fn main() !void {
                 },
             };
 
-            {
-                var wz = tracy.zoneN("yoke_work_render");
-                defer wz.end();
-
-                module.api().render(storage.memory(), .{
-                    .dt_ns = render_step_ns,
-                    .tick_index = render_tick,
-                    .input = render_input,
-                }, &frame);
-            }
+            draw.begin(&frame, yoke_theme);
 
             {
                 var yz = tracy.zoneN("yoke_panel_grid");
@@ -1020,11 +1249,70 @@ pub fn main() !void {
                     .input = render_input,
                 }, .{
                     .module_name = module.moduleName(),
-                    .reload_count = reload_count,
+                    .telemetry = &dashboard_telemetry,
                     .update_count = update_tick,
                     .render_count = render_tick,
+                    .reload_count = reload_count,
+                    .update_hz = update_hz,
+                    .render_hz = render_hz,
+                    .fps_ema = @as(f32, @floatCast(fps_guard.emaFps())),
                     .input = render_input,
                 });
+            }
+
+            {
+                var wz = tracy.zoneN("yoke_work_render");
+                defer wz.end();
+
+                const module_body = yoke_panels.moduleBodyRect();
+                if (module_body.w > 0 and module_body.h > 0) {
+                    const module_logical = draw.rect(
+                        0.0,
+                        0.0,
+                        if (module_body.h > 0.0)
+                            panel_grid.timeline_body_height * module_body.w / module_body.h
+                        else
+                            panel_grid.timeline_body_height,
+                        panel_grid.timeline_body_height,
+                    );
+                    const module_fit = canvas_fit.contain(module_logical.w, module_logical.h, module_body);
+                    const module_cmd_start: usize = @intCast(frame.command_buffer.count);
+
+                    var module_frame = abi.Frame{
+                        .target = .{
+                            .width = @max(@as(u32, @intFromFloat(module_logical.w)), 1),
+                            .height = @max(@as(u32, @intFromFloat(module_logical.h)), 1),
+                        },
+                        .command_buffer = frame.command_buffer,
+                    };
+
+                    draw.pushClipRect(&module_frame, module_logical);
+                    const work_render_start_ticks = try clock.nowTicks();
+                    module.api().render(storage.memory(), .{
+                        .dt_ns = render_step_ns,
+                        .tick_index = render_tick,
+                        .input = render_input,
+                    }, &module_frame);
+                    const work_render_end_ticks = try clock.nowTicks();
+                    dashboard_telemetry.render.push(nsToMsF32(clock.deltaNs(work_render_start_ticks, work_render_end_ticks)));
+                    draw.popClip(&module_frame);
+
+                    const module_cmd_end: usize = @intCast(module_frame.command_buffer.count);
+                    canvas_fit.transformCommandSlice(
+                        module_frame.command_buffer.commands[module_cmd_start..module_cmd_end],
+                        module_fit,
+                    );
+
+                    dashboard_telemetry.last_render_command_count = @as(u32, @intCast(module_cmd_end - module_cmd_start));
+                    frame.command_buffer.count = module_frame.command_buffer.count;
+                }
+            }
+
+            {
+                var cz = tracy.zoneN("yoke_cursor_overlay");
+                defer cz.end();
+
+                draw.cursorSquare(&frame, render_input.mouse_x, render_input.mouse_y, yoke_theme.cursor);
             }
 
             {

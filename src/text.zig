@@ -1,11 +1,16 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const draw = @import("draw.zig");
+const reflection = @import("reflection.zig");
 
 pub const Options = struct {
     scale: f32 = 2.0,
     glyph_spacing: f32 = 1.0,
     line_spacing: f32 = 1.0,
+
+    comptime {
+        reflection.assertNoWastedBytePadding(@This());
+    }
 };
 
 pub const Size = struct {

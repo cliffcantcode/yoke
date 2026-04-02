@@ -45,6 +45,8 @@ pub const RenderCommandKind = enum(u32) {
     fill_rect = 2,
     stroke_rect = 3,
     line = 4,
+    push_clip = 5,
+    pop_clip = 6,
 };
 
 pub const RenderCommand = extern struct {
@@ -181,6 +183,32 @@ pub fn line(
         .y0 = y0,
         .x1 = x1,
         .y1 = y1,
+    });
+}
+
+
+pub fn pushClip(
+    frame: *Frame,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+) void {
+    assert.hard(x1 >= x0, "pushClip requires x1 >= x0, got x0={d} x1={d}", .{ x0, x1 });
+    assert.hard(y1 >= y0, "pushClip requires y1 >= y0, got y0={d} y1={d}", .{ y0, y1 });
+
+    _ = pushCommand(frame, .{
+        .kind = @intFromEnum(RenderCommandKind.push_clip),
+        .x0 = x0,
+        .y0 = y0,
+        .x1 = x1,
+        .y1 = y1,
+    });
+}
+
+pub fn popClip(frame: *Frame) void {
+    _ = pushCommand(frame, .{
+        .kind = @intFromEnum(RenderCommandKind.pop_clip),
     });
 }
 

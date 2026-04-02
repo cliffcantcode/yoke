@@ -234,6 +234,15 @@ pub fn line(
     abi.line(frame, x0, y0, x1, y1, thickness, color);
 }
 
+
+pub fn pushClipRect(frame: *abi.Frame, r: Rect) void {
+    abi.pushClip(frame, r.x, r.y, r.right(), r.top());
+}
+
+pub fn popClip(frame: *abi.Frame) void {
+    abi.popClip(frame);
+}
+
 pub fn panel(frame: *abi.Frame, r: Rect, fill: u32, border: u32) void {
     fillRoundedRect(frame, r, border, panel_corner_radius, RoundedCorners.all);
 

@@ -3,16 +3,21 @@ const std = @import("std");
 const abi = @import("abi.zig");
 const themes = @import("themes.zig");
 const draw = @import("draw.zig");
-
 const assert = @import("assert.zig");
+const reflection = @import("reflection.zig");
 
 pub const DraggablePanel = struct {
     rect: draw.Rect,
-    dragging: bool = false,
     drag_start_mouse_x: f32 = 0,
     drag_start_mouse_y: f32 = 0,
     drag_start_rect_x: f32 = 0,
     drag_start_rect_y: f32 = 0,
+    dragging: bool = false,
+    _padding: [3]u8 = undefined,
+
+    comptime {
+        reflection.assertNoWastedBytePadding(@This());
+    }
 
     pub fn init(x: f32, y: f32, w: f32, h: f32) DraggablePanel {
         const panel = DraggablePanel{ .rect = .{ .x = x, .y = y, .w = w, .h = h } };
@@ -70,6 +75,20 @@ pub const DraggablePanel = struct {
         self.asserts();
     }
 
+    pub fn headerRect(self: *const DraggablePanel, header_height: f32) draw.Rect {
+        self.asserts();
+        assert.is_finite(header_height, "DraggablePanel.header_height", .{});
+        assert.hard(header_height >= 0, "header_height must be >= 0, got {d}", .{header_height});
+        assert.hard(header_height <= self.rect.h, "header_height {d} exceeds panel height {d}", .{ header_height, self.rect.h });
+
+        return draw.rect(
+            self.rect.x + draw.panel_border_thickness,
+            self.rect.top() - header_height,
+            @max(self.rect.w - 2.0 * draw.panel_border_thickness, 0.0),
+            @max(header_height - draw.panel_border_thickness, 0.0),
+        );
+    }
+
     pub fn draw_panel(
         self: *const DraggablePanel,
         frame: *abi.Frame,
@@ -107,13 +126,7 @@ pub const DraggablePanel = struct {
         else
             theme.accent;
 
-        const header_rect = draw.rect(
-            self.rect.x + draw.panel_border_thickness,
-            self.rect.top() - header_height,
-            @max(self.rect.w - 2.0 * draw.panel_border_thickness, 0.0),
-            @max(header_height - draw.panel_border_thickness, 0.0),
-        );
-
+        const header_rect = self.headerRect(header_height);
         if (header_rect.w > 0 and header_rect.h > 0) {
             draw.fillRoundedRect(
                 frame,

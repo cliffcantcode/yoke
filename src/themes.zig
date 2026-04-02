@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const reflection = @import("reflection.zig");
+
 // Fastest path for day-to-day work: change this one line and save.
 // Options: catppuccin_mocha, adventhealth_dark, adventhealth_light
 pub const default = catppuccin_mocha;
@@ -26,6 +28,12 @@ pub const Theme = struct {
 
     cursor: u32,
     origin_marker: u32,
+
+    _padding: [4]u8 = undefined,
+
+    comptime {
+        reflection.assertNoWastedBytePadding(@This());
+    }
 };
 
 pub fn rgb(r: u8, g: u8, b: u8) u32 {
