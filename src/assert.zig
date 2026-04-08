@@ -5,6 +5,26 @@ pub inline fn is_finite(float: f32, comptime fmt: []const u8, args: anytype) voi
     if (!std.math.isFinite(float)) std.debug.panic(fmt, args);
 }
 
+pub inline fn finite(value: f32, label: []const u8) void {
+    if (!std.math.isFinite(value)) {
+        std.debug.panic("{s} must be finite, got {d}", .{ label, value });
+    }
+}
+
+pub inline fn non_negative(value: f32, label: []const u8) void {
+    finite(value, label);
+    if (value < 0.0) {
+        std.debug.panic("{s} must be >= 0, got {d}", .{ label, value });
+    }
+}
+
+pub inline fn unit_interval(value: f32, label: []const u8) void {
+    finite(value, label);
+    if (value < 0.0 or value > 1.0) {
+        std.debug.panic("{s} must be in [0, 1], got {d}", .{ label, value });
+    }
+}
+
 pub inline fn hard(ok: bool, comptime fmt: []const u8, args: anytype) void {
     if (!ok) std.debug.panic(fmt, args);
 }

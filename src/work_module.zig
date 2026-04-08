@@ -1,140 +1,205 @@
 const std = @import("std");
 
+const abi = @import("abi.zig");
 const work = @import("work_runtime.zig");
 const draw = @import("draw.zig");
+const layout = @import("layout.zig");
 const theme = @import("themes.zig").default;
 
 const tau: f32 = 2.0 * std.math.pi;
 
+const ContentMode = enum {
+    timeline,
+    table,
+};
+
 // Edit these values as though this were your own project code.
 // Yoke should stay out of the way and give you a fast edit -> reload -> inspect loop.
 const knobs = struct {
-    // Geometry
-    const margin_px: f32 = 28;
-    const amplitude_px: f32 = 110;
+    const default_content_mode: ContentMode = .table;
+
+    // Shared geometry
+    const margin_px: f32 = 28.0;
+
+    // Timeline demo
+    const amplitude_px: f32 = 110.0;
     const baseline_y_01: f32 = 0.5; // 0 = bottom of plot, 1 = top of plot
     const baseline_offset_px: f32 = 0.0;
-
-    // Wave shape
     const cycles_across_plot: f32 = 1.75;
     const phase_radians: f32 = 0.0;
     const animation_hz: f32 = 0.24;
     const line_thickness_px: f32 = 1.0;
-
-    // Sampling / guides
     const sample_count: u32 = 256;
     const vertical_divisions: u32 = 3;
     const show_grid: bool = false;
     const show_amplitude_guides: bool = true;
     const show_sample_points: bool = false;
     const sample_marker_every: u32 = 16;
+
+    // Table demo
+    const table_text_scale: f32 = 2.0;
+    const table_padding_px: f32 = 16.0;
+    const table_column_gap_px: f32 = 18.0;
+    const table_row_gap_px: f32 = 8.0;
 };
 
 pub const App = struct {
     time_sec: f32 = 0.0,
-    paused: bool = false,
+    content_mode: ContentMode = knobs.default_content_mode,
 
     pub fn onReload(self: *App, memory: *work.PlatformMemory) void {
         _ = memory;
-        // Hot reload back to a known phase so visual changes are easy to compare.
         self.time_sec = 0.0;
+        self.content_mode = knobs.default_content_mode;
     }
 
     pub fn update(self: *App, memory: *work.PlatformMemory, ctx: work.TickContext) void {
         _ = memory;
 
-        if (ctx.input.space.changed != 0 and ctx.input.space.is_down != 0) {
-            self.paused = !self.paused;
+        if (abi.buttonPressed(ctx.input.space)) {
+            self.content_mode = switch (self.content_mode) {
+                .timeline => .table,
+                .table => .timeline,
+            };
         }
 
-        if (ctx.input.escape.changed != 0 and ctx.input.escape.is_down != 0) {
+        if (abi.buttonPressed(ctx.input.escape)) {
             self.time_sec = 0.0;
+            self.content_mode = knobs.default_content_mode;
         }
 
-        if (!self.paused) {
-            self.time_sec += @as(f32, @floatFromInt(ctx.dt_ns)) /
-                @as(f32, @floatFromInt(std.time.ns_per_s));
-        }
+        self.time_sec += nsToSec(ctx.dt_ns);
     }
 
     pub fn render(self: *App, memory: *work.PlatformMemory, ctx: work.TickContext, frame: *work.Frame) void {
         _ = memory;
         _ = ctx;
 
-        const width = @as(f32, @floatFromInt(frame.target.width));
-        const height = @as(f32, @floatFromInt(frame.target.height));
+        const body = draw.frameInnerRect(frame, knobs.margin_px);
+        if (body.w <= 2.0 or body.h <= 2.0) return;
 
-        const plot = draw.rect(
-            knobs.margin_px,
-            knobs.margin_px,
-            @max(width - knobs.margin_px * 2.0, 0.0),
-            @max(height - knobs.margin_px * 2.0, 0.0),
-        );
-        if (plot.w <= 2.0 or plot.h <= 2.0) return;
-
-        draw.strokeRect(frame, plot, 1.0, theme.panel_border);
-
-        const baseline_y = plot.y + plot.h * knobs.baseline_y_01 + knobs.baseline_offset_px;
-        const phase = knobs.phase_radians + self.time_sec * tau * knobs.animation_hz;
-        const amplitude_px = plotAmplitudePx(plot, baseline_y);
-
-        if (knobs.show_grid and knobs.vertical_divisions > 1) {
-            var i: u32 = 1;
-            while (i < knobs.vertical_divisions) : (i += 1) {
-                const t = @as(f32, @floatFromInt(i)) /
-                    @as(f32, @floatFromInt(knobs.vertical_divisions));
-                const gx = plot.x + plot.w * t;
-                draw.line(frame, gx, plot.y, gx, plot.top(), 1.0, theme.panel_border);
-            }
-        }
-
-        draw.line(frame, plot.x, baseline_y, plot.right(), baseline_y, 1.0, theme.panel_border);
-
-        if (knobs.show_amplitude_guides) {
-            draw.line(
-                frame,
-                plot.x,
-                baseline_y + amplitude_px,
-                plot.right(),
-                baseline_y + amplitude_px,
-                1.0,
-                theme.panel_border,
-            );
-            draw.line(
-                frame,
-                plot.x,
-                baseline_y - amplitude_px,
-                plot.right(),
-                baseline_y - amplitude_px,
-                1.0,
-                theme.panel_border,
-            );
-        }
-
-        if (knobs.sample_count < 2) return;
-
-        var prev_x = plot.x;
-        var prev_y = sampleWaveY(0.0, baseline_y, phase, amplitude_px);
-
-        var i: u32 = 1;
-        while (i < knobs.sample_count) : (i += 1) {
-            const t = @as(f32, @floatFromInt(i)) /
-                @as(f32, @floatFromInt(knobs.sample_count - 1));
-            const x = plot.x + plot.w * t;
-            const y = sampleWaveY(t, baseline_y, phase, amplitude_px);
-
-            draw.line(frame, prev_x, prev_y, x, y, knobs.line_thickness_px, theme.accent);
-
-            if (knobs.show_sample_points and
-                (i % knobs.sample_marker_every == 0 or i == knobs.sample_count - 1))
-            {
-                draw.fillRect(frame, draw.rect(x - 1.5, y - 1.5, 3.0, 3.0), theme.accent);
-            }
-
-            prev_x = x;
-            prev_y = y;
+        switch (self.content_mode) {
+            .timeline => drawWaveDemo(self, frame, body),
+            .table => drawTableDemo(frame, body),
         }
     }
+};
+
+const sample_columns = [_]layout.TableColumn{
+    .{ .header = "FIELD", .weight = 2.4 },
+    .{ .header = "TYPE", .weight = 1.2 },
+    .{ .header = "VALUE", .weight = 2.0 },
+    .{ .header = "NOTES", .weight = 3.4 },
+};
+
+const sample_rows = [_][sample_columns.len][]const u8{
+    .{ "patient_id", "string", "PT-10427", "stable join key from intake" },
+    .{ "encounter_ts", "datetime", "2025-04-06 08:12", "timezone normalized to local" },
+    .{ "heart_rate", "u16", "78", "raw device sample from room monitor" },
+    .{ "bp_systolic", "u16", "118", "latest validated observation" },
+    .{ "bp_diastolic", "u16", "74", "paired with systolic sample" },
+    .{ "note_excerpt", "text", "follow-up requested after discharge", "truncated with ellipsis if narrow" },
+};
+
+fn nsToSec(ns: u64) f32 {
+    return @as(f32, @floatFromInt(ns)) / @as(f32, @floatFromInt(std.time.ns_per_s));
+}
+
+fn drawTableDemo(frame: *work.Frame, body: draw.Rect) void {
+    var table = layout.Table(sample_columns.len).init(
+        frame,
+        body,
+        theme,
+        .{ .scale = knobs.table_text_scale },
+        sample_columns,
+        .{
+            .padding = knobs.table_padding_px,
+            .column_gap = knobs.table_column_gap_px,
+            .row_gap = knobs.table_row_gap_px,
+            .border_color = theme.panel_border,
+            .header_color = theme.accent,
+            .cell_color = theme.text,
+            .rule_color = theme.panel_border,
+        },
+    );
+
+    for (sample_rows) |row| {
+        if (!table.row(row)) break;
+    }
+}
+
+fn drawWaveDemo(self: *const App, frame: *work.Frame, plot: draw.Rect) void {
+    const baseline_y = plot.y + plot.h * knobs.baseline_y_01 + knobs.baseline_offset_px;
+    const baseline_y_01 = if (plot.h > 0.0)
+        (baseline_y - plot.y) / plot.h
+    else
+        0.0;
+    const phase = knobs.phase_radians + self.time_sec * tau * knobs.animation_hz;
+    const amplitude_px = plotAmplitudePx(plot, baseline_y);
+    const amplitude_y_01 = if (plot.h > 0.0)
+        amplitude_px / plot.h
+    else
+        0.0;
+
+    if (knobs.show_grid and knobs.vertical_divisions > 1) {
+        var i: u32 = 1;
+        while (i < knobs.vertical_divisions) : (i += 1) {
+            const t = @as(f32, @floatFromInt(i)) /
+                @as(f32, @floatFromInt(knobs.vertical_divisions));
+            const gx = plot.x + plot.w * t;
+            draw.line(frame, gx, plot.y, gx, plot.top(), 1.0, theme.panel_border);
+        }
+    }
+
+    draw.line(frame, plot.x, baseline_y, plot.right(), baseline_y, 1.0, theme.panel_border);
+
+    if (knobs.show_amplitude_guides) {
+        draw.line(
+            frame,
+            plot.x,
+            baseline_y + amplitude_px,
+            plot.right(),
+            baseline_y + amplitude_px,
+            1.0,
+            theme.panel_border,
+        );
+        draw.line(
+            frame,
+            plot.x,
+            baseline_y - amplitude_px,
+            plot.right(),
+            baseline_y - amplitude_px,
+            1.0,
+            theme.panel_border,
+        );
+    }
+
+    draw.drawTimeline(
+        WaveTimelineContext,
+        waveTimelineY01,
+        frame,
+        plot,
+        .{
+            .sample_count = @intCast(knobs.sample_count),
+            .line_thickness = knobs.line_thickness_px,
+            .line_color = theme.accent,
+            .border_color = theme.panel_border,
+            .marker_color = if (knobs.show_sample_points) theme.accent else null,
+            .marker_size = if (knobs.show_sample_points) 3.0 else 0.0,
+            .marker_every = if (knobs.show_sample_points) @intCast(knobs.sample_marker_every) else 0,
+        },
+        .{
+            .baseline_y_01 = baseline_y_01,
+            .amplitude_y_01 = amplitude_y_01,
+            .phase = phase,
+        },
+    );
+}
+
+const WaveTimelineContext = struct {
+    baseline_y_01: f32,
+    amplitude_y_01: f32,
+    phase: f32,
 };
 
 fn plotAmplitudePx(plot: draw.Rect, baseline_y: f32) f32 {
@@ -143,9 +208,10 @@ fn plotAmplitudePx(plot: draw.Rect, baseline_y: f32) f32 {
     return @min(knobs.amplitude_px, @min(max_down, max_up));
 }
 
-fn sampleWaveY(x_01: f32, baseline_y: f32, phase: f32, amplitude_px: f32) f32 {
-    const wave_phase = x_01 * knobs.cycles_across_plot * tau + phase;
-    return baseline_y + @sin(wave_phase) * amplitude_px;
+fn waveTimelineY01(context: WaveTimelineContext, sample_index: usize, x_01: f32) f32 {
+    _ = sample_index;
+    const wave_phase = x_01 * knobs.cycles_across_plot * tau + context.phase;
+    return context.baseline_y_01 + @sin(wave_phase) * context.amplitude_y_01;
 }
 
 const runtime = work.Runtime(App);
@@ -153,4 +219,3 @@ const runtime = work.Runtime(App);
 export fn yoke_get_api() callconv(.c) *const work.Api {
     return runtime.api();
 }
-

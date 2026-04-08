@@ -1266,13 +1266,8 @@ pub fn main() !void {
 
                 const module_body = yoke_panels.moduleBodyRect();
                 if (module_body.w > 0 and module_body.h > 0) {
-                    const module_logical = draw.rect(
-                        0.0,
-                        0.0,
-                        if (module_body.h > 0.0)
-                            panel_grid.timeline_body_height * module_body.w / module_body.h
-                        else
-                            panel_grid.timeline_body_height,
+                    const module_logical = panel_grid.logicalBodyForRect(
+                        module_body,
                         panel_grid.timeline_body_height,
                     );
                     const module_fit = canvas_fit.contain(module_logical.w, module_logical.h, module_body);

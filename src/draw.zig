@@ -40,13 +40,22 @@ pub const Rect = struct {
     w: f32,
     h: f32,
 
+    pub fn assertValid(self: Rect) void {
+        assert.finite(self.x, "Rect.x");
+        assert.finite(self.y, "Rect.y");
+        assert.finite(self.w, "Rect.w");
+        assert.finite(self.h, "Rect.h");
+        assert.hard(self.w >= 0.0, "Rect.w must be >= 0, got {d}", .{self.w});
+        assert.hard(self.h >= 0.0, "Rect.h must be >= 0, got {d}", .{self.h});
+    }
+
     pub fn right(self: Rect) f32 {
-        assert.hard(self.w >= 0, "Rect.right requires non-negative width, got {d}", .{self.w});
+        self.assertValid();
         return self.x + self.w;
     }
 
     pub fn top(self: Rect) f32 {
-        assert.hard(self.h >= 0, "Rect.height requires non-negative height, got {d}", .{self.h});
+        self.assertValid();
         return self.y + self.h;
     }
 };
@@ -76,13 +85,29 @@ const RowInsets = struct {
 };
 
 pub fn rect(x: f32, y: f32, w: f32, h: f32) Rect {
-    assert.hard(w >= 0, "rect requires non-negative width, got {d}", .{w});
-    assert.hard(h >= 0, "rect requires non-negative height, got {d}", .{h});
-    return .{ .x = x, .y = y, .w = w, .h = h };
+    const r = Rect{ .x = x, .y = y, .w = w, .h = h };
+    r.assertValid();
+    return r;
+}
+
+pub fn frameRect(frame: *const abi.Frame) Rect {
+    return rect(
+        0.0,
+        0.0,
+        @as(f32, @floatFromInt(frame.target.width)),
+        @as(f32, @floatFromInt(frame.target.height)),
+    );
+}
+
+pub fn frameInnerRect(frame: *const abi.Frame, padding: f32) Rect {
+    return inset(frameRect(frame), padding);
 }
 
 pub fn inset(r: Rect, amount: f32) Rect {
-    assert.hard(amount >= 0, "inset requires non-negative amount, got {d}", .{amount});
+    r.assertValid();
+    assert.finite(amount, "inset.amount");
+    assert.hard(amount >= 0.0, "inset requires non-negative amount, got {d}", .{amount});
+
     const shrink = amount * 2.0;
     return rect(
         r.x + amount,
@@ -93,8 +118,9 @@ pub fn inset(r: Rect, amount: f32) Rect {
 }
 
 pub fn contains(r: Rect, px: f32, py: f32) bool {
-    assert.hard(r.w >= 0, "contains requires non-negative rect width, got {d}", .{r.w});
-    assert.hard(r.h >= 0, "contains requires non-negative rect height, got {d}", .{r.h});
+    r.assertValid();
+    assert.finite(px, "contains.px");
+    assert.finite(py, "contains.py");
     return px >= r.x and px < r.right() and py >= r.y and py < r.top();
 }
 
@@ -107,14 +133,21 @@ pub fn originMarker(frame: *abi.Frame, theme: Theme) void {
 }
 
 pub fn fillRect(frame: *abi.Frame, r: Rect, color: u32) void {
+    r.assertValid();
+    if (r.w <= 0.0 or r.h <= 0.0) return;
     abi.fillRect(frame, r.x, r.y, r.right(), r.top(), color);
 }
 
 pub fn strokeRect(frame: *abi.Frame, r: Rect, thickness: f32, color: u32) void {
+    r.assertValid();
+    assert.finite(thickness, "strokeRect.thickness");
+    assert.hard(thickness >= 0.0, "strokeRect thickness must be >= 0, got {d}", .{thickness});
+    if (r.w <= 0.0 or r.h <= 0.0 or thickness <= 0.0) return;
     abi.strokeRect(frame, r.x, r.y, r.right(), r.top(), thickness, color);
 }
 
 fn quantizeRect(r: Rect) IntRect {
+    r.assertValid();
     return .{
         .x0 = @intFromFloat(r.x),
         .y0 = @intFromFloat(r.y),
@@ -231,11 +264,118 @@ pub fn line(
     thickness: f32,
     color: u32,
 ) void {
+    assert.finite(x0, "line.x0");
+    assert.finite(y0, "line.y0");
+    assert.finite(x1, "line.x1");
+    assert.finite(y1, "line.y1");
+    assert.finite(thickness, "line.thickness");
+    assert.hard(thickness >= 0.0, "line thickness must be >= 0, got {d}", .{thickness});
+    if (thickness <= 0.0) return;
     abi.line(frame, x0, y0, x1, y1, thickness, color);
 }
 
+pub const TimelineOptions = struct {
+    sample_count: usize,
+    line_thickness: f32 = 1.0,
+    line_color: u32,
+    background_color: ?u32 = null,
+    border_color: ?u32 = null,
+    marker_color: ?u32 = null,
+    marker_size: f32 = 0.0,
+    marker_every: usize = 0,
+
+    pub fn assertValid(self: @This()) void {
+        assert.finite(self.line_thickness, "TimelineOptions.line_thickness");
+        assert.hard(self.line_thickness >= 0.0, "TimelineOptions.line_thickness must be >= 0, got {d}", .{self.line_thickness});
+        assert.finite(self.marker_size, "TimelineOptions.marker_size");
+        assert.hard(self.marker_size >= 0.0, "TimelineOptions.marker_size must be >= 0, got {d}", .{self.marker_size});
+        if (self.marker_color != null and self.marker_size > 0.0) {
+            assert.hard(self.marker_every > 0, "TimelineOptions marker drawing requires marker_every > 0", .{});
+        }
+    }
+};
+
+pub fn timelineY(plot: Rect, y_01: f32) f32 {
+    plot.assertValid();
+    assert.finite(y_01, "timelineY.y_01");
+    return plot.y + std.math.clamp(y_01, 0.0, 1.0) * plot.h;
+}
+
+fn timelineSampleX(plot: Rect, last_sample_index: usize, sample_index: usize) f32 {
+    if (last_sample_index == 0) return plot.x;
+    return plot.x + plot.w * (@as(f32, @floatFromInt(sample_index)) /
+        @as(f32, @floatFromInt(last_sample_index)));
+}
+
+fn drawTimelineMarker(frame: *abi.Frame, x: f32, y: f32, size: f32, color: u32) void {
+    if (size <= 0.0) return;
+
+    const half = size * 0.5;
+    fillRect(frame, rect(x - half, y - half, size, size), color);
+}
+
+fn shouldDrawTimelineMarker(options: TimelineOptions, sample_index: usize) bool {
+    return options.marker_color != null and
+        options.marker_size > 0.0 and
+        options.marker_every > 0 and
+        (sample_index % options.marker_every == 0 or sample_index + 1 == options.sample_count);
+}
+
+fn timelineSampleY(
+    comptime Context: type,
+    comptime sampleY01Fn: fn (Context, usize, f32) f32,
+    plot: Rect,
+    context: Context,
+    sample_index: usize,
+    x_01: f32,
+) f32 {
+    const y_01 = sampleY01Fn(context, sample_index, x_01);
+    assert.finite(y_01, "drawTimeline.sample_y_01");
+    return timelineY(plot, y_01);
+}
+
+pub fn drawTimeline(
+    comptime Context: type,
+    comptime sampleY01Fn: fn (Context, usize, f32) f32,
+    frame: *abi.Frame,
+    plot: Rect,
+    options: TimelineOptions,
+    context: Context,
+) void {
+    plot.assertValid();
+    options.assertValid();
+
+    if (options.background_color) |background_color| fillRect(frame, plot, background_color);
+    if (options.border_color) |border_color| strokeRect(frame, plot, 1.0, border_color);
+    if (plot.w <= 0.0 or plot.h <= 0.0 or options.sample_count < 2) return;
+
+    const last_sample_index = options.sample_count - 1;
+    var prev_x = plot.x;
+    var prev_y = timelineSampleY(Context, sampleY01Fn, plot, context, 0, 0.0);
+
+    if (shouldDrawTimelineMarker(options, 0)) {
+        drawTimelineMarker(frame, prev_x, prev_y, options.marker_size, options.marker_color.?);
+    }
+
+    var sample_index: usize = 1;
+    while (sample_index < options.sample_count) : (sample_index += 1) {
+        const x_01 = @as(f32, @floatFromInt(sample_index)) /
+            @as(f32, @floatFromInt(last_sample_index));
+        const x = timelineSampleX(plot, last_sample_index, sample_index);
+        const y = timelineSampleY(Context, sampleY01Fn, plot, context, sample_index, x_01);
+
+        line(frame, prev_x, prev_y, x, y, options.line_thickness, options.line_color);
+        if (shouldDrawTimelineMarker(options, sample_index)) {
+            drawTimelineMarker(frame, x, y, options.marker_size, options.marker_color.?);
+        }
+
+        prev_x = x;
+        prev_y = y;
+    }
+}
 
 pub fn pushClipRect(frame: *abi.Frame, r: Rect) void {
+    r.assertValid();
     abi.pushClip(frame, r.x, r.y, r.right(), r.top());
 }
 
